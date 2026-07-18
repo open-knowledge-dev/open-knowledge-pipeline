@@ -1,1 +1,29 @@
+name: AI Scraper — Groq Culture
 
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run AI scraper
+        env:
+          TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          SUBMISSIONS_PER_RUN: '4'
+          SUBMISSION_DELAY: '30'
+        run: python ai_scraper.py
