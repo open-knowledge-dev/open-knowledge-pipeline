@@ -1,29 +1,21 @@
 """
 Ghana-GPT Batch Organizer — Security Scan + Category Move
 ===========================================================
-Processes ALL pending files in one pass:
-1. Security scan (same patterns as security_scanner.py)
-2. CRITICAL findings → stays in pending/ for manual review
-3. Clean files → extracted to correct category folder
-4. Stores filename in Supabase
-
-Runs via GitHub Actions. Handles 660,000+ files.
+Processes pending files in batches with rate limiting.
+Runs for 50 minutes per hour, then stops. Resumes next run.
+Handles 6M+ files over multiple weeks.
 """
 
 import os
 import sys
 import re
 import base64
-import json
+import time
 import requests
 from datetime import datetime, timezone
 
 print("[INIT] Starting batch organizer...")
 sys.stdout.flush()
-
-# ============================================================
-# Configuration
-# ============================================================
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -43,7 +35,6 @@ GITHUB_HEADERS = {
 from supabase import create_client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Category mapping (same as main.py)
 CATEGORY_SLUGS = {
     "Agriculture & Farming": "agriculture_farming",
     "Business & Finance": "business_finance",
@@ -67,10 +58,6 @@ CATEGORY_SLUGS = {
     "Other": "other",
 }
 
-# ============================================================
-# Security Patterns (Same as security_scanner.py)
-# ============================================================
-
 CRITICAL_PATTERNS = {
     "script_tag": re.compile(r'<script[^>]*>.*?</script>', re.IGNORECASE | re.DOTALL),
     "nested_script": re.compile(r'<[^>]*script[^>]*>[^<]*<[^>]*script[^>]*>', re.IGNORECASE),
@@ -87,9 +74,13 @@ CRITICAL_PATTERNS = {
     "obfuscated_js": re.compile(r'(?:fromCharCode|unescape\s*\(|\\x[0-9a-fA-F]{2})', re.IGNORECASE),
 }
 
+# Rate limiting: max API calls per hour
+MAX_CALLS_PER_HOUR = 4000
+# Safety margin — stop 5 minutes before the hour ends
+MAX_RUNTIME_SECONDS = 3300  # 55 minutes
+
 
 def security_scan(content: str) -> list:
-    """Check content for critical patterns. Returns list of findings."""
     findings = []
     for name, pattern in CRITICAL_PATTERNS.items():
         if pattern.search(content):
@@ -97,30 +88,14 @@ def security_scan(content: str) -> list:
     return findings
 
 
-# ============================================================
-# GitHub Helpers
-# ============================================================
-
-def list_all_pending_files():
-    """Get ALL .md file paths from pending/ with pagination."""
-    all_files = []
-    page = 1
-    while True:
-        url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/pending"
-        params = {"page": page, "per_page": 100}
-        response = requests.get(url, headers=GITHUB_HEADERS, params=params, timeout=30)
-        if response.status_code != 200:
-            break
+def list_page(page: int):
+    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/pending"
+    params = {"page": page, "per_page": 100}
+    response = requests.get(url, headers=GITHUB_HEADERS, params=params, timeout=30)
+    if response.status_code == 200:
         data = response.json()
-        if not data:
-            break
-        for item in data:
-            if item["name"].endswith(".md"):
-                all_files.append(item["path"])
-        if len(data) < 100:
-            break
-        page += 1
-    return all_files
+        return [item for item in data if item["name"].endswith(".md")]
+    return []
 
 
 def get_file_content(path: str) -> str:
@@ -146,8 +121,6 @@ def get_file_sha(path: str) -> str:
 
 
 def move_file(source_path: str, dest_path: str, content: str) -> bool:
-    """Move file from source to destination in GitHub."""
-    # Create at destination
     create_url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{dest_path}"
     create_payload = {
         "message": f"Batch organize: {source_path}",
@@ -158,8 +131,6 @@ def move_file(source_path: str, dest_path: str, content: str) -> bool:
         r = requests.put(create_url, json=create_payload, headers=GITHUB_HEADERS, timeout=15)
         if r.status_code not in [200, 201]:
             return False
-
-        # Delete source
         sha = get_file_sha(source_path)
         if sha:
             delete_url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{source_path}"
@@ -170,122 +141,127 @@ def move_file(source_path: str, dest_path: str, content: str) -> bool:
         return False
 
 
-# ============================================================
-# Content Parsers
-# ============================================================
-
 def extract_category(content: str) -> str:
-    """Extract category from file content."""
     match = re.search(r'\*\*Category:\*\*\s*(.+)', content)
-    if match:
-        return match.group(1).strip()
-    return "Other"
+    return match.group(1).strip() if match else "Other"
 
 
 def extract_submission_id(content: str) -> str:
-    """Extract submission ID from content."""
     match = re.search(r'GHGPT-\d{4}-\d{4}', content)
     return match.group(0) if match else ""
 
 
 def extract_topic(content: str) -> str:
-    """Extract topic from content."""
     match = re.search(r'^#\s+(.+)', content, re.MULTILINE)
-    if match:
-        return match.group(1).strip()[:80]
-    return "untitled"
+    return match.group(1).strip()[:80] if match else "untitled"
 
 
-# ============================================================
-# Main Logic
-# ============================================================
-
-def organize_all():
+def organize_batch():
     print("=" * 60)
-    print("Batch Organizer — Security Scan + Category Move")
+    print("Batch Organizer — Weekly Rate-Limited Mode")
     print("=" * 60)
+    print(f"Max runtime: {MAX_RUNTIME_SECONDS}s ({MAX_RUNTIME_SECONDS//60} min)")
+    print(f"Max API calls: {MAX_CALLS_PER_HOUR}")
     sys.stdout.flush()
 
-    print("\n[1/3] Listing all pending files...")
-    sys.stdout.flush()
-    pending_files = list_all_pending_files()
-    total = len(pending_files)
-    print(f"Found {total} files")
-    sys.stdout.flush()
+    # Load progress
+    start_page = 1
+    try:
+        with open("batch_progress.txt", "r") as f:
+            start_page = int(f.read().strip())
+        print(f"Resuming from page {start_page}")
+    except FileNotFoundError:
+        print("Starting from page 1")
 
-    if total == 0:
-        print("No files to process.")
-        return
-
+    start_time = time.time()
+    api_calls = 0
     moved = 0
     flagged = 0
     failed = 0
-    skipped = 0
 
-    print(f"\n[2/3] Processing {total} files...")
-    sys.stdout.flush()
+    page = start_page
+    while True:
+        # Check time limit
+        elapsed = time.time() - start_time
+        if elapsed > MAX_RUNTIME_SECONDS:
+            print(f"\nTime limit reached ({elapsed:.0f}s). Saving progress to page {page}.")
+            with open("batch_progress.txt", "w") as f:
+                f.write(str(page))
+            break
 
-    for i, filepath in enumerate(pending_files):
-        # Progress every 500 files
-        if i % 500 == 0 and i > 0:
-            print(f"  Progress: {i}/{total} | Moved: {moved} | Flagged: {flagged} | Failed: {failed}")
-            sys.stdout.flush()
+        # Check API limit
+        if api_calls >= MAX_CALLS_PER_HOUR:
+            print(f"\nAPI limit reached ({api_calls} calls). Saving progress to page {page}.")
+            with open("batch_progress.txt", "w") as f:
+                f.write(str(page))
+            break
 
-        # Read content
-        content = get_file_content(filepath)
-        if not content:
-            failed += 1
-            continue
+        # Get page of files
+        files = list_page(page)
+        api_calls += 1
 
-        # Security scan
-        findings = security_scan(content)
-        if findings:
-            flagged += 1
-            if flagged <= 50:  # Only log first 50 to avoid spam
-                print(f"  🚨 FLAGGED: {filepath} — {', '.join(findings)}")
-            continue
+        if not files:
+            print(f"\nNo more files at page {page}. Done!")
+            break
 
-        # Extract metadata
-        category = extract_category(content)
-        submission_id = extract_submission_id(content)
-        topic = extract_topic(content)
+        for item in files:
+            if api_calls >= MAX_CALLS_PER_HOUR or (time.time() - start_time) > MAX_RUNTIME_SECONDS:
+                break
 
-        if not submission_id:
-            skipped += 1
-            continue
+            filepath = item["path"]
+            content = get_file_content(filepath)
+            api_calls += 1
 
-        # Determine destination
-        folder = CATEGORY_SLUGS.get(category, "other")
-        safe_topic = re.sub(r'[^a-zA-Z0-9_\-\s]', '', topic).replace(' ', '_')[:80]
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        dest_path = f"{folder}/{timestamp}-{safe_topic}-{submission_id[-4:]}.md"
+            if not content:
+                failed += 1
+                continue
 
-        # Move file
-        success = move_file(filepath, dest_path, content)
-        if success:
-            moved += 1
-            # Store filename in Supabase
-            try:
-                supabase.table("submissions").update({
-                    "pending_filename": dest_path,
-                    "status": "approved"
-                }).eq("submission_id", submission_id).execute()
-            except Exception:
-                pass
-        else:
-            failed += 1
+            # Security scan
+            findings = security_scan(content)
+            if findings:
+                flagged += 1
+                continue
 
-    # Summary
-    print(f"\n[3/3] COMPLETE")
-    print("=" * 60)
-    print(f"Total files: {total}")
-    print(f"Moved to category folders: {moved}")
-    print(f"Flagged (stays in pending): {flagged}")
-    print(f"Failed: {failed}")
-    print(f"Skipped (no ID): {skipped}")
-    print("=" * 60)
+            category = extract_category(content)
+            submission_id = extract_submission_id(content)
+            topic = extract_topic(content)
+
+            if not submission_id:
+                failed += 1
+                continue
+
+            folder = CATEGORY_SLUGS.get(category, "other")
+            safe_topic = re.sub(r'[^a-zA-Z0-9_\-\s]', '', topic).replace(' ', '_')[:80]
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            dest_path = f"{folder}/{timestamp}-{safe_topic}-{submission_id[-4:]}.md"
+
+            success = move_file(filepath, dest_path, content)
+            api_calls += 2
+
+            if success:
+                moved += 1
+                try:
+                    supabase.table("submissions").update({
+                        "pending_filename": dest_path,
+                        "status": "approved"
+                    }).eq("submission_id", submission_id).execute()
+                    api_calls += 1
+                except Exception:
+                    pass
+            else:
+                failed += 1
+
+            time.sleep(0.1)
+
+        print(f"Page {page}: {moved} moved, {flagged} flagged, {failed} failed")
+        sys.stdout.flush()
+        page += 1
+
+    print(f"\nSession complete: {moved} moved, {flagged} flagged, {failed} failed")
+    print(f"API calls: {api_calls}")
+    print(f"Resume from page {page} next run")
     sys.stdout.flush()
 
 
 if __name__ == "__main__":
-    organize_all()
+    organize_batch()
