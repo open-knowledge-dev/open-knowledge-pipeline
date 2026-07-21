@@ -114,7 +114,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Provide a step-by-step guide for "{topic}". '
             "Number each step. Explain why each step is important. "
-            "Include practical tips from real experience. Write at least 250 words."
+            "Include practical tips from real experience. Write at least 550 words."
         ),
     },
     {
