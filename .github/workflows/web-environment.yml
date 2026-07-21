@@ -24,8 +24,8 @@ jobs:
           SUBMISSIONS_PER_RUN: '10'
           SUBMISSION_DELAY: '30'
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          GITHUB_KNOWLEDGE_REPO: ${{ secrets.GITHUB_KNOWLEDGE_REPO }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
           SCRAPER_NAME: 'web-environment'
           FOCUS_CATEGORIES: 'Environment & Nature,Agriculture & Farming,Science & Innovation'
         run: python scraper.py
