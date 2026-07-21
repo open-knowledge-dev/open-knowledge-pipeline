@@ -1,13 +1,14 @@
 """
-AI-Powered Knowledge Scraper — v2.1
+AI-Powered Knowledge Scraper — v2.2
 ====================================
 Generates unique knowledge content using AI APIs with:
 - Dynamic topic generation (no fixed lists)
-- 8 rotating prompt styles for variety
+- 9 rotating prompt styles for variety (added practical-guide)
 - State file memory to avoid repeats
 - Category weighting toward thin categories
 - Markdown stripping for clean output
 - Deduplication feedback loop
+- Minimum 670 words per submission
 
 APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
 """
@@ -59,9 +60,12 @@ ALL_CATEGORIES = [
 SCRAPER_NAME = os.getenv("SCRAPER_NAME", "ai-scraper")
 STATE_FILE_PATH = "admin/scraper-state.json"
 
+# Quality threshold
+MIN_CONTENT_LENGTH = 500  # Minimum characters before submission
+
 
 # ===========================================================================
-# Prompt Styles — 8 different ways to ask for knowledge
+# Prompt Styles — 9 different ways to ask for knowledge
 # ===========================================================================
 
 PROMPT_STYLES = [
@@ -71,14 +75,15 @@ PROMPT_STYLES = [
             "You are a patient teacher explaining things to a curious 15-year-old. "
             "Use simple words, real examples from daily life, and make it easy to understand. "
             "Write in first person as if sharing knowledge you learned from experience. "
-            "Be warm, encouraging, and practical. Never mention AI. "
-            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores for bold or italics. "
+            "Be warm, encouraging, and practical. Never mention AI or language models. "
+            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
             "Write in plain text only."
         ),
         "user_template": (
             'Explain "{topic}" in simple terms. '
             "Use examples from everyday life. Make it easy for anyone to understand. "
-            "Write at least 670 words. Use plain text only — no markdown formatting."
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -86,14 +91,14 @@ PROMPT_STYLES = [
         "system": (
             "You are an elder sharing wisdom gained through a lifetime of experience. "
             "Write in first person with warmth and authority. Share real stories and lessons. "
-            "Your knowledge comes from living, not books. Never mention AI. "
-            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
-            "Write in plain text only."
+            "Your knowledge comes from living, not books. Never mention AI or language models. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Share your personal knowledge and experience about "{topic}". '
             "Tell stories from real life. What have you learned? What works? What doesn't? "
-            "Write at least 670 words. Use plain text only — no markdown formatting."
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -101,28 +106,31 @@ PROMPT_STYLES = [
         "system": (
             "You are an analytical thinker who compares different approaches. "
             "Write in first person. Show pros and cons of different methods. "
-            "Be fair and balanced. Never mention AI. "
+            "Be fair and balanced. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Compare different approaches to "{topic}". '
             "What are the pros and cons of each? Which works best in different situations? "
-            "Write at least 670 words. Use plain text only."
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
         "name": "step-by-step",
         "system": (
-            "You are a skilled practitioner teaching a craft. "
+            "You are a skilled practitioner teaching a craft you have mastered over decades. "
             "Give clear, numbered steps. Explain WHY each step matters. "
-            "Write in first person. Be precise and practical. Never mention AI. "
+            "Include materials needed, time required, and difficulty level. "
+            "Write in first person. Be precise and practical. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Provide a step-by-step guide for "{topic}". '
-            "Number each step. Explain why each step is important. "
-            "Include practical tips from real experience. Write at least 670 words. "
-            "Use plain text only — no markdown."
+            'Provide a complete step-by-step guide for "{topic}". '
+            "Include: what you need before starting, each step numbered and explained, "
+            "how long each step takes, and common mistakes to avoid. "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -130,41 +138,46 @@ PROMPT_STYLES = [
         "system": (
             "You are a historian who understands how things evolved over time. "
             "Trace origins and changes. Show how the past connects to the present. "
-            "Write in first person with rich detail. Never mention AI. "
+            "Write in first person with rich detail. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Trace the history and evolution of "{topic}". '
-            "How did it start? How has it changed? Where is it now? "
-            "Write at least 670 words. Use plain text only."
+            "How did it start? How has it changed over time? Where is it now? "
+            "What forces shaped its development? "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
         "name": "common-mistakes",
         "system": (
             "You are a seasoned expert who has seen people make every mistake possible. "
-            "Share what goes wrong and how to avoid it. Be honest about failures. "
-            "Write in first person. Never mention AI. "
+            "Share what goes wrong and how to avoid it. Be honest about failures — yours and others'. "
+            "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'What are the most common mistakes people make with "{topic}"? '
-            "Explain each mistake clearly. How can they be avoided? "
-            "Write at least 670 words. Use plain text only."
+            "For each mistake: explain what it is, why people make it, what happens as a result, "
+            "and exactly how to avoid it. Be specific and practical. "
+            "Write at least 670 words. Use plain text only — no markdown formatting."
         ),
     },
     {
         "name": "regional-variations",
         "system": (
             "You are a well-traveled observer who notices how things differ across regions. "
-            "Describe local variations and explain why they exist. "
-            "Write in first person with rich observation. Never mention AI. "
+            "Describe local variations and explain why they exist — climate, culture, history, resources. "
+            "Write in first person with rich observation. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Describe how "{topic}" differs across regions in Africa. '
             "What are the local variations? Why do they exist? "
-            "Write at least 670 words. Use plain text only."
+            "How do climate, culture, and available resources shape these differences? "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -172,12 +185,39 @@ PROMPT_STYLES = [
         "system": (
             "You are a forward-thinking expert who sees where things are heading. "
             "Discuss trends, challenges, and opportunities. Be realistic but hopeful. "
-            "Write in first person. Never mention AI. "
+            "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Where is "{topic}" heading? Discuss current trends, future challenges, '
-            "and what changes are coming. Write at least 670 words. Use plain text only."
+            "and what changes are coming. What should people prepare for? "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
+        ),
+    },
+    {
+        "name": "practical-guide",
+        "system": (
+            "You are a skilled practitioner who has done this hundreds of times. "
+            "You know every trick, shortcut, and pitfall. "
+            "Give clear, actionable instructions that anyone can follow. "
+            "Include what materials or preparation is needed, how long it takes, "
+            "the difficulty level, and what to do when things go wrong. "
+            "Write in first person from real experience — your hands have done this work. "
+            "Never mention AI or language models. "
+            "Do NOT use markdown formatting. Write in plain text only."
+        ),
+        "user_template": (
+            'Provide a complete practical guide for "{topic}". '
+            "Structure your answer to include: "
+            "1) What you need before starting (materials, tools, conditions), "
+            "2) How long it takes from start to finish, "
+            "3) The difficulty level (easy/moderate/hard), "
+            "4) Step-by-step instructions with explanations of why each step matters, "
+            "5) Common mistakes and how to recover from them, "
+            "6) Tips from experience that make it easier or better. "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
         ),
     },
 ]
@@ -199,7 +239,6 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     # Bullet points: - item, * item
     text = re.sub(r'^[\-\*]\s+', '', text, flags=re.MULTILINE)
-    # Numbered lists: 1. item -> 1. item (keep numbers, strip extra formatting)
     # Code blocks: ```code```
     text = re.sub(r'```[^`]*```', '', text)
     # Inline code: `code`
@@ -454,7 +493,7 @@ def generate_with_groq(topic: str, category: str, style: Dict) -> str:
             {"role": "user", "content": user_prompt},
         ],
         "temperature": random.uniform(0.7, 0.95),
-        "max_tokens": 1500,
+        "max_tokens": 2000,
     }
     try:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -485,7 +524,7 @@ def generate_with_mistral(topic: str, category: str, style: Dict) -> str:
             {"role": "user", "content": user_prompt},
         ],
         "temperature": random.uniform(0.7, 0.95),
-        "max_tokens": 1500,
+        "max_tokens": 2000,
     }
     try:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -507,12 +546,12 @@ def generate_content(topic: str, category: str) -> str:
 
     if GROQ_API_KEY:
         content = generate_with_groq(topic, category, style)
-        if content and len(content) > 300:
+        if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
     if MISTRAL_API_KEY:
         content = generate_with_mistral(topic, category, style)
-        if content and len(content) > 300:
+        if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
     return ""
@@ -579,10 +618,11 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.1 — {SCRAPER_NAME}")
+    print(f"AI Scraper v2.2 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
+    print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
@@ -613,9 +653,9 @@ def run_ai_scraper(max_submissions: int = 10):
         sys.stdout.flush()
 
         knowledge = generate_content(topic, category)
-        if not knowledge or len(knowledge) < 200:
+        if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed += 1
-            print(f"  Failed to generate content")
+            print(f"  Failed to generate content (got {len(knowledge) if knowledge else 0} chars, need {MIN_CONTENT_LENGTH})")
             state = record_topic(state, topic, "", False)
             continue
 
@@ -628,12 +668,12 @@ def run_ai_scraper(max_submissions: int = 10):
             '', knowledge
         ).strip()
 
-        if len(knowledge) < 200:
+        if len(knowledge) < MIN_CONTENT_LENGTH:
             failed += 1
             state = record_topic(state, topic, "", False)
             continue
 
-        print(f"  Content: {len(knowledge)} chars")
+        print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
         sys.stdout.flush()
 
         success, submission_id = submit_to_form(topic, category, knowledge)
