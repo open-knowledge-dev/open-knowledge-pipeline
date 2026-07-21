@@ -24,4 +24,8 @@ jobs:
           SUBMISSIONS_PER_RUN: '10'
           SUBMISSION_DELAY: '30'
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_KNOWLEDGE_REPO: ${{ secrets.GITHUB_KNOWLEDGE_REPO }}
+          SCRAPER_NAME: 'web-general'
+          FOCUS_CATEGORIES: 'Culture & Traditions,History & Heritage,Tourism & Travel,Family & Relationships,Governance & Leadership'
         run: python scraper.py
