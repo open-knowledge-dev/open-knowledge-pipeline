@@ -35,14 +35,13 @@ SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "4"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
 REQUEST_TIMEOUT = 60
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_KNOWLEDGE_REPO = os.getenv("GITHUB_KNOWLEDGE_REPO", "")
+GH_TOKEN = os.getenv("GH_TOKEN", "")
+KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
-# Categories this scraper should focus on (comma-separated env var)
 FOCUS_CATEGORIES_RAW = os.getenv("FOCUS_CATEGORIES", "")
 FOCUS_CATEGORIES = [c.strip() for c in FOCUS_CATEGORIES_RAW.split(",") if c.strip()]
 
@@ -179,8 +178,8 @@ PROMPT_STYLES = [
 def _github_headers() -> Dict[str, str]:
     """Build headers for GitHub API requests."""
     headers = {"Accept": "application/vnd.github.v3+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
     return headers
 
 
@@ -189,9 +188,9 @@ def load_state() -> Dict:
     Load the scraper state file from the knowledge repo.
     Returns empty dict if not found or on error.
     """
-    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
-    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
     try:
         response = requests.get(url, headers=_github_headers(), timeout=15)
         if response.status_code == 200:
@@ -209,12 +208,11 @@ def save_state(state: Dict) -> bool:
     Save the scraper state file to the knowledge repo.
     Creates or updates the file.
     """
-    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
     content_json = json.dumps(state, indent=2, default=str)
-    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
 
-    # Check if file exists
     sha = ""
     try:
         response = requests.get(url, headers=_github_headers(), timeout=10)
@@ -288,7 +286,7 @@ def record_rejected(state: Dict, topic: str) -> Dict:
 def get_category_counts() -> Dict[str, int]:
     """
     Count files in each category folder of the knowledge repo.
-    Returns dict of {category_slug: file_count}.
+    Returns dict of {category_name: file_count}.
     Used to prioritize thin categories.
     """
     category_slugs = {
@@ -314,10 +312,10 @@ def get_category_counts() -> Dict[str, int]:
         "Other": "other",
     }
     counts = {}
-    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
         return counts
     for category_name, slug in category_slugs.items():
-        url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{slug}"
+        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{slug}"
         try:
             response = requests.get(url, headers=_github_headers(), timeout=10)
             if response.status_code == 200:
@@ -337,11 +335,9 @@ def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
     """
     if not focus:
         focus = ALL_CATEGORIES
-    # Filter to focus categories
     available = {cat: counts.get(cat, 0) for cat in focus if cat in counts}
     if not available:
         return random.choice(focus)
-    # Weight: inversely proportional to file count. Minimum weight of 1.
     max_count = max(available.values()) + 1
     weighted = []
     for cat, count in available.items():
@@ -363,7 +359,6 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
     last_topics = get_last_topics(state, 20)
     rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-20:]
 
-    # Get category counts and pick a thin category
     counts = get_category_counts()
     category = pick_category_weighted(counts, focus_categories)
 
@@ -388,7 +383,6 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
         f"Topic:"
     )
 
-    # Try Groq first for topic generation
     topic_text = ""
     if GROQ_API_KEY:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -427,7 +421,6 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
             print(f"  [TopicGen] Mistral failed: {e}")
 
     if not topic_text or len(topic_text) < 10:
-        # Fallback: manual topic from focus categories
         fallbacks = [
             f"Traditional practices for {category.lower()} in West African communities",
             f"How {category.lower()} knowledge is passed between generations in rural areas",
@@ -597,7 +590,7 @@ def run_ai_scraper(max_submissions: int = 4):
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
-    print(f"State: {'ENABLED' if GITHUB_TOKEN else 'DISABLED'}")
+    print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -605,7 +598,6 @@ def run_ai_scraper(max_submissions: int = 4):
         print("ERROR: No API keys configured.")
         return
 
-    # Load state
     state = load_state()
     print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
 
@@ -620,13 +612,11 @@ def run_ai_scraper(max_submissions: int = 4):
         print(f"\n[{submission_count + 1}/{max_submissions}] Generating topic...")
         sys.stdout.flush()
 
-        # Generate dynamic topic
         topic, category = generate_topic(state, FOCUS_CATEGORIES)
         print(f"  Topic: {topic}")
         print(f"  Category: {category}")
         sys.stdout.flush()
 
-        # Generate content
         knowledge = generate_content(topic, category)
         if not knowledge or len(knowledge) < 200:
             failed += 1
@@ -634,7 +624,6 @@ def run_ai_scraper(max_submissions: int = 4):
             state = record_topic(state, topic, "", False)
             continue
 
-        # Clean AI artifacts
         knowledge = re.sub(
             r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
             '', knowledge
@@ -648,7 +637,6 @@ def run_ai_scraper(max_submissions: int = 4):
         print(f"  Content: {len(knowledge)} chars")
         sys.stdout.flush()
 
-        # Submit
         success, submission_id = submit_to_form(topic, category, knowledge)
 
         if success:
@@ -658,15 +646,12 @@ def run_ai_scraper(max_submissions: int = 4):
         else:
             failed += 1
             state = record_topic(state, topic, "", False)
-            # Check if it was a duplicate rejection
             if "already been submitted" in str(submission_id):
                 state = record_rejected(state, topic)
 
-        # Save state after each submission
-        if GITHUB_TOKEN:
+        if GH_TOKEN:
             save_state(state)
 
-        # Delay between submissions
         if submission_count < max_submissions and (i < max_submissions - 1):
             wait_time = SUBMISSION_DELAY + random.randint(1, 10)
             print(f"  Waiting {wait_time}s...")
