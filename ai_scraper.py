@@ -75,7 +75,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Explain "{topic}" in simple terms. '
             "Use examples from everyday life. Make it easy for anyone to understand. "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -88,7 +88,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Share your personal knowledge and experience about "{topic}". '
             "Tell stories from real life. What have you learned? What works? What doesn't? "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -101,7 +101,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Compare different approaches to "{topic}". '
             "What are the pros and cons of each? Which works best in different situations? "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -127,7 +127,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Trace the history and evolution of "{topic}". '
             "How did it start? How has it changed? Where is it now? "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -140,7 +140,7 @@ PROMPT_STYLES = [
         "user_template": (
             'What are the most common mistakes people make with "{topic}"? '
             "Explain each mistake clearly. How can they be avoided? "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -153,7 +153,7 @@ PROMPT_STYLES = [
         "user_template": (
             'Describe how "{topic}" differs across regions in Africa. '
             "What are the local variations? Why do they exist? "
-            "Write at least 250 words."
+            "Write at least 550 words."
         ),
     },
     {
@@ -165,7 +165,7 @@ PROMPT_STYLES = [
         ),
         "user_template": (
             'Where is "{topic}" heading? Discuss current trends, future challenges, '
-            "and what changes are coming. Write at least 250 words."
+            "and what changes are coming. Write at least 550 words."
         ),
     },
 ]
