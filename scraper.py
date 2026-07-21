@@ -1,5 +1,5 @@
 """
-Web Knowledge Scraper — v2.0
+Web Knowledge Scraper — v2.1
 =============================
 Searches public domain sources for knowledge content with:
 - State file memory to avoid repeating URLs and topics
@@ -256,14 +256,12 @@ def record_submission(state: Dict, topic: str, url: str, success: bool) -> Dict:
 # ===========================================================================
 
 def pick_category() -> str:
-    """Pick a category, weighted toward focus categories if set."""
     if FOCUS_CATEGORIES:
         return random.choice(FOCUS_CATEGORIES)
     return random.choice(ALL_CATEGORIES)
 
 
 def pick_topic_for_category(category: str, state: Dict) -> str:
-    """Pick a topic seed for a category, avoiding recent topics."""
     seeds = CATEGORY_SEEDS.get(category, ["general knowledge"])
     last_topics = get_last_topics(state, 30)
     qualifiers = [
@@ -285,13 +283,12 @@ def pick_topic_for_category(category: str, state: Dict) -> str:
 # ===========================================================================
 
 def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
-    """Search Wikipedia. Returns (content, source_url) or None."""
     print(f"    [Wikipedia] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://en.wikipedia.org/w/api.php"
         params = {"action": "query", "list": "search", "srsearch": topic, "format": "json", "srlimit": 1}
-        headers = {"User-Agent": "KnowledgePipeline/2.0"}
+        headers = {"User-Agent": "KnowledgePipeline/2.1"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         results = data.get("query", {}).get("search", [])
@@ -314,13 +311,12 @@ def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
-    """Search Stack Exchange. Returns (content, source_url) or None."""
     print(f"    [StackExchange] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://api.stackexchange.com/2.3/search/advanced"
         params = {"order": "desc", "sort": "votes", "q": topic, "site": "stackoverflow", "pagesize": 1, "filter": "withbody"}
-        headers = {"User-Agent": "KnowledgePipeline/2.0"}
+        headers = {"User-Agent": "KnowledgePipeline/2.1"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -342,13 +338,12 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
-    """Search MDN Web Docs. Returns (content, source_url) or None."""
     print(f"    [MDN] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://developer.mozilla.org/api/v1/search"
         params = {"q": topic, "locale": "en-US"}
-        headers = {"User-Agent": "KnowledgePipeline/2.0"}
+        headers = {"User-Agent": "KnowledgePipeline/2.1"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -367,15 +362,9 @@ def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def fetch_content(topic: str, state: Dict) -> Optional[Tuple[str, str]]:
-    """
-    Try multiple sources for a topic.
-    Returns (content, source_url) or None.
-    Skips previously scraped URLs.
-    """
     scraped_urls = get_scraped_urls(state)
     sources = [search_wikipedia, search_stackexchange, search_mdn]
     random.shuffle(sources)
-
     for source_func in sources:
         result = source_func(topic)
         if result:
@@ -390,10 +379,6 @@ def fetch_content(topic: str, state: Dict) -> Optional[Tuple[str, str]]:
 # ===========================================================================
 
 def rewrite_content(original: str, topic: str, category: str) -> str:
-    """
-    Rewrite scraped content in a conversational first-person voice.
-    Uses randomized personal starters and one of three rewrite styles.
-    """
     personal_starters = [
         "In my community, we", "Growing up, I learned that",
         "My grandmother taught me that", "Many people in our region believe",
@@ -469,7 +454,6 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
-    """Submit to training form. Returns (success, submission_id)."""
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -524,9 +508,8 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 # ===========================================================================
 
 def run_scraper(max_submissions: int = 10):
-    """Main scraper loop with state, category awareness, and source variation."""
     print("=" * 60)
-    print(f"Web Scraper v2.0 — {SCRAPER_NAME}")
+    print(f"Web Scraper v2.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
