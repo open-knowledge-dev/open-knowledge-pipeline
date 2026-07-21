@@ -7,7 +7,7 @@ Searches public domain sources for knowledge content with:
 - Multiple rewrite styles for variety
 - Source rotation with randomized search queries
 
-Sources: Wikipedia, Wikisource, FAO, Gutenberg, StackExchange, MDN, GitHub
+Sources: Wikipedia, StackExchange, MDN Web Docs
 """
 
 import os
@@ -32,8 +32,8 @@ SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
 REQUEST_TIMEOUT = 30
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_KNOWLEDGE_REPO = os.getenv("GITHUB_KNOWLEDGE_REPO", "")
+GH_TOKEN = os.getenv("GH_TOKEN", "")
+KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
 FOCUS_CATEGORIES_RAW = os.getenv("FOCUS_CATEGORIES", "")
@@ -52,7 +52,6 @@ ALL_CATEGORIES = [
     "Science & Innovation", "Other",
 ]
 
-# Base topics per category — used for search queries, combined with random variations
 CATEGORY_SEEDS = {
     "Agriculture & Farming": [
         "small-scale farming techniques", "crop rotation methods", "natural pest control",
@@ -174,15 +173,15 @@ CATEGORY_SEEDS = {
 
 def _github_headers() -> Dict[str, str]:
     headers = {"Accept": "application/vnd.github.v3+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
     return headers
 
 
 def load_state() -> Dict:
-    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
-    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
     try:
         response = requests.get(url, headers=_github_headers(), timeout=15)
         if response.status_code == 200:
@@ -196,10 +195,10 @@ def load_state() -> Dict:
 
 
 def save_state(state: Dict) -> bool:
-    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
     content_json = json.dumps(state, indent=2, default=str)
-    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
     sha = ""
     try:
         response = requests.get(url, headers=_github_headers(), timeout=10)
@@ -253,7 +252,7 @@ def record_submission(state: Dict, topic: str, url: str, success: bool) -> Dict:
 
 
 # ===========================================================================
-# Category Weighting
+# Category and Topic Selection
 # ===========================================================================
 
 def pick_category() -> str:
@@ -267,22 +266,17 @@ def pick_topic_for_category(category: str, state: Dict) -> str:
     """Pick a topic seed for a category, avoiding recent topics."""
     seeds = CATEGORY_SEEDS.get(category, ["general knowledge"])
     last_topics = get_last_topics(state, 30)
-
-    # Try to find a seed that hasn't been used recently
+    qualifiers = [
+        "in rural communities", "in urban areas", "across West Africa",
+        "in East Africa", "traditional methods of", "modern approaches to",
+        "sustainable", "community-based", "practical guide to",
+        "history of", "cultural significance of", "step-by-step",
+        "common mistakes in", "benefits of", "challenges of",
+    ]
     for seed in random.sample(seeds, len(seeds)):
         if seed not in last_topics:
-            # Add a random qualifier for variation
-            qualifiers = [
-                "in rural communities", "in urban areas", "across West Africa",
-                "in East Africa", "traditional methods of", "modern approaches to",
-                "sustainable", "community-based", "practical guide to",
-                "history of", "cultural significance of", "step-by-step",
-                "common mistakes in", "benefits of", "challenges of",
-            ]
             qualifier = random.choice(qualifiers)
             return f"{qualifier} {seed}"
-
-    # Fallback: use a random seed
     return f"{random.choice(qualifiers)} {random.choice(seeds)}"
 
 
@@ -454,7 +448,7 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
         rewritten = f"{starter}\n\n"
         for i, sentence in enumerate(key_sentences[:5], 1):
             rewritten += f"{i}. {sentence}\n\n"
-    else:  # comparative
+    else:
         rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
         if len(key_sentences) >= 3:
             rewritten += f"On one hand, {key_sentences[1].lower()}\n\n"
@@ -536,7 +530,7 @@ def run_scraper(max_submissions: int = 10):
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
-    print(f"State: {'ENABLED' if GITHUB_TOKEN else 'DISABLED'}")
+    print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -547,7 +541,7 @@ def run_scraper(max_submissions: int = 10):
     skipped = 0
     failed = 0
 
-    for i in range(max_submissions * 3):  # Try up to 3x to account for skips
+    for i in range(max_submissions * 3):
         if submission_count >= max_submissions:
             break
 
@@ -560,7 +554,6 @@ def run_scraper(max_submissions: int = 10):
         print(f"  Category: {category}")
         sys.stdout.flush()
 
-        # Fetch content
         result = fetch_content(topic, state)
         if not result:
             skipped += 1
@@ -570,7 +563,6 @@ def run_scraper(max_submissions: int = 10):
         original_text, source_url = result
         print(f"  Source: {source_url[:80]}...")
 
-        # Rewrite
         rewritten = rewrite_content(original_text, topic, category)
         if len(rewritten) < 200:
             skipped += 1
@@ -580,7 +572,6 @@ def run_scraper(max_submissions: int = 10):
         print(f"  Content: {len(rewritten)} chars")
         sys.stdout.flush()
 
-        # Submit
         success, submission_id = submit_to_form(topic, category, rewritten)
 
         if success:
@@ -590,8 +581,7 @@ def run_scraper(max_submissions: int = 10):
             failed += 1
             state = record_submission(state, topic, source_url, False)
 
-        # Save state
-        if GITHUB_TOKEN:
+        if GH_TOKEN:
             save_state(state)
 
         if submission_count < max_submissions:
