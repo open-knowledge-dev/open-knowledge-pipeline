@@ -1,46 +1,48 @@
 """
-Open Knowledge Pipeline — Web Scraper
-=======================================
-Searches permitted public domain and free-to-use sources,
-rewrites content in a conversational voice,
-and submits to the configured training pipeline.
+Web Knowledge Scraper — v2.0
+=============================
+Searches public domain sources for knowledge content with:
+- State file memory to avoid repeating URLs and topics
+- Category awareness toward thin categories
+- Multiple rewrite styles for variety
+- Source rotation with randomized search queries
 
-Sources: Wikipedia (CC-BY-SA 4.0), Wikisource, UN FAO,
-Project Gutenberg, Stack Exchange, MDN Web Docs, GitHub Repos.
-
-All sources: Free forever. Commercial use allowed.
-Designed to run via GitHub Actions on a schedule.
+Sources: Wikipedia, Wikisource, FAO, Gutenberg, StackExchange, MDN, GitHub
 """
 
 import os
 import sys
-import requests
-import re
 import time
 import random
+import json
 import base64
-from typing import Optional
+import requests
+import re
+from datetime import datetime, timezone
+from typing import Optional, List, Tuple, Dict
 
-# ============================================================
+
+# ===========================================================================
 # Configuration
-# ============================================================
+# ===========================================================================
 
-TRAINING_FORM_URL = os.getenv(
-    "TRAINING_FORM_URL",
-    "https://training.example.com"
-)
-
-SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "4"))
-SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "900"))
-REQUEST_TIMEOUT = 30
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
+SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
+REQUEST_TIMEOUT = 30
 
-# ============================================================
-# Categories
-# ============================================================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_KNOWLEDGE_REPO = os.getenv("GITHUB_KNOWLEDGE_REPO", "")
+GITHUB_API = "https://api.github.com"
 
-CATEGORIES = [
+FOCUS_CATEGORIES_RAW = os.getenv("FOCUS_CATEGORIES", "")
+FOCUS_CATEGORIES = [c.strip() for c in FOCUS_CATEGORIES_RAW.split(",") if c.strip()]
+
+SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-scraper")
+STATE_FILE_PATH = "admin/scraper-state.json"
+
+ALL_CATEGORIES = [
     "Agriculture & Farming", "Business & Finance", "Culture & Traditions",
     "Education & Learning", "Health & Medicine", "Technology & Innovation",
     "Tourism & Travel", "History & Heritage", "Food & Cuisine",
@@ -50,855 +52,556 @@ CATEGORIES = [
     "Science & Innovation", "Other",
 ]
 
-# ============================================================
-# Topic Lists
-# ============================================================
-
-TOPICS = {
+# Base topics per category — used for search queries, combined with random variations
+CATEGORY_SEEDS = {
     "Agriculture & Farming": [
-        "Cassava farming techniques in West Africa",
-        "Cocoa production in Ghana",
-        "Yam cultivation in Nigeria",
-        "Small-scale poultry farming in Kenya",
-        "Maize farming in Tanzania",
-        "Irrigation methods for dry season farming",
-        "Organic farming practices in Africa",
-        "Shea butter production from shea trees",
-        "Fishing methods in Lake Volta",
-        "Coffee farming in Ethiopia",
-        "Palm oil production in West Africa",
-        "Beekeeping for honey production in Africa",
-        "Millet farming in the Sahel region",
-        "Groundnut farming in Senegal",
-        "Banana plantation management in Africa",
-        "Sorghum farming techniques in Sudan",
-        "Livestock rearing in East Africa",
-        "Rice farming in Mali",
-        "Cotton farming in Burkina Faso",
-        "Urban farming in African cities",
-        "Tomato farming and preservation",
-        "Plantain cultivation and harvesting",
-        "Sustainable agriculture practices",
-        "Agroforestry techniques in Africa",
-        "Soil conservation methods for farmers",
-        "Crop rotation benefits for soils",
-        "Natural pest control methods in farming",
-        "Water management for small farms",
-        "Post-harvest storage techniques",
-    ],
-    "Health & Medicine": [
-        "Traditional herbal remedies for malaria",
-        "Neem leaves for treating skin conditions",
-        "Ginger and lemon for treating colds",
-        "Moringa leaves for nutrition and health",
-        "Shea butter for skin healing",
-        "Traditional birth practices in Africa",
-        "Bitter kola for respiratory health",
-        "Pawpaw leaves for digestion problems",
-        "Honey for wound healing naturally",
-        "Garlic for blood pressure management",
-        "Traditional bone setting practices",
-        "Herbal teas for stomach ailments",
-        "Clove oil for toothache relief",
-        "Traditional massage techniques",
-        "Baobab fruit for immune system health",
-        "Guava leaves for diarrhea treatment",
-        "Turmeric for reducing inflammation",
-        "Scent leaf for fever reduction",
-        "Aloe vera for treating burns",
-        "Natural soap benefits for skin",
-        "Mental health practices in communities",
-        "Maternal health traditional knowledge",
-        "Nutrition for children in households",
-        "Preventing common diseases in tropical climates",
-        "First aid using local materials",
-    ],
-    "Food & Cuisine": [
-        "How to prepare jollof rice",
-        "Making fufu from cassava and plantain",
-        "Egusi soup preparation method",
-        "Ugali making techniques",
-        "Injera fermentation process",
-        "Thieboudienne recipe",
-        "Pilau rice cooking method",
-        "Rolex street food preparation",
-        "Tagine preparation techniques",
-        "Braai cooking methods",
-        "Attieke preparation process",
-        "Waakye cooking instructions",
-        "Palm butter soup recipe",
-        "Sadza making process",
-        "Nsima preparation methods",
-        "Preserving fish through smoking",
-        "Making groundnut soup",
-        "Palm wine tapping methods",
-        "Fermenting ogi from maize",
-        "Preparing spicy fried plantains",
-        "Making banku from corn and cassava",
-        "Preparing tuo zaafi from millet",
-        "How to make zobo drink",
-        "Preparing bissap juice",
-        "Traditional bread making methods",
+        "small-scale farming techniques", "crop rotation methods", "natural pest control",
+        "water conservation farming", "soil fertility management", "livestock care",
+        "seed saving practices", "harvest storage methods", "agroforestry",
+        "urban farming techniques",
     ],
     "Culture & Traditions": [
-        "Naming ceremonies for newborns",
-        "Kente weaving traditional methods",
-        "Wedding customs in West Africa",
-        "Coming-of-age rituals and ceremonies",
-        "Traditional dance meanings and origins",
-        "Initiation ceremonies",
-        "Coffee ceremony traditions",
-        "Griot storytelling traditions",
-        "Mask dances and significance",
-        "Wedding traditions along the coast",
-        "Funeral rites and ceremonies",
-        "Durbar festival celebrations",
-        "Traditional ceremonies",
-        "Tea ceremony in the Sahara",
-        "Trance dance practices",
-        "Marriage customs in North Africa",
-        "House painting art traditions",
-        "Spiritual practices",
-        "Beauty traditions",
-        "Sailing traditions",
-        "Drumming traditions and meanings",
-        "Storytelling around the fire",
-        "Respect for elders in cultures",
-        "Traditional greetings by region",
-        "Coming of age ceremonies",
+        "traditional ceremonies", "oral storytelling", "community festivals",
+        "traditional clothing", "coming of age rituals", "wedding customs",
+        "naming ceremonies", "funeral traditions", "harvest celebrations",
+        "dance traditions",
+    ],
+    "Health & Medicine": [
+        "herbal remedies", "traditional healing", "nutrition practices",
+        "maternal health", "childhood illnesses", "preventive care",
+        "mental wellness", "first aid knowledge", "community health",
+        "medicinal plants",
+    ],
+    "Food & Cuisine": [
+        "traditional recipes", "food preservation", "fermentation methods",
+        "staple food preparation", "spice blending", "street food culture",
+        "ceremonial foods", "cooking techniques", "beverage preparation",
+        "food safety practices",
     ],
     "Education & Learning": [
-        "Tips for passing examinations successfully",
-        "How to study effectively with limited resources",
-        "Teaching children to read in local languages",
-        "Memorization techniques used by elders",
-        "Learning through apprenticeship in trades",
-        "Using storytelling for education",
-        "Mathematics in everyday market transactions",
-        "Adult literacy programs in rural areas",
-        "Science education using local materials",
-        "History of universities and learning",
-        "Preparing for exams in junior high",
-        "Online learning resources for students",
-        "Teaching methods for large classrooms",
-        "How parents can support education",
-        "Vocational training opportunities",
-        "Learning to code as a student",
-        "Scholarship opportunities for students",
-        "The importance of girl child education",
-        "Distance learning strategies that work",
-        "Peer teaching methods in study groups",
-    ],
-    "Business & Finance": [
-        "How to start a small business with little capital",
-        "Saving money through collection systems",
-        "Mobile money tips for small business owners",
-        "Market price negotiation strategies",
-        "Running a successful roadside food stand",
-        "How to get a microfinance loan",
-        "Record keeping for small businesses",
-        "Import and export basics for traders",
-        "Building customer loyalty in local markets",
-        "Women entrepreneurship success",
-        "How to write a simple business plan",
-        "Marketing your business on messaging apps",
-        "Managing business cash flow for beginners",
-        "How to price your products for profit",
-        "Building a brand as a small business",
-        "Sourcing products from local suppliers",
-        "Dealing with competition in local markets",
-        "Expanding from one shop to multiple locations",
-        "Using social media for free marketing",
-        "Partnership agreements between businesses",
+        "study techniques", "teaching methods", "apprenticeship systems",
+        "language learning", "vocational training", "adult education",
+        "child education", "skill sharing", "memory techniques",
+        "practical education",
     ],
     "History & Heritage": [
-        "History of ancient empires in Africa",
-        "Ancient pyramids and kingdoms",
-        "Wealthy empires and their leaders",
-        "Stone structures and their history",
-        "Resistance to colonization",
-        "Caliphates in West Africa",
-        "Ancient contributions to world science",
-        "Bronze artwork history and significance",
-        "Resistance to foreign invasion",
-        "Independence movement origins and leaders",
-        "Independence leaders and their legacy",
-        "Trans-Saharan trade routes",
-        "Kingdoms before colonization",
-        "The role of women in history",
-        "Archaeological discoveries",
-        "Oral history traditions",
-        "The impact of colonialism on borders",
-        "Liberation movements",
-        "Traditional governance systems",
-        "Contributions to mathematics and astronomy",
+        "pre-colonial kingdoms", "trade routes", "independence movements",
+        "archaeological sites", "oral histories", "historical figures",
+        "colonial resistance", "traditional governance", "cultural heritage",
+        "ancient civilizations",
     ],
     "Technology & Innovation": [
-        "Mobile phone repair businesses",
-        "Solar power solutions for rural areas",
-        "Using messaging apps for business marketing",
-        "Drone technology for farming",
-        "Mobile banking revolution explained",
-        "Local tech hubs and innovation spaces",
-        "Recycling electronics in markets",
-        "Water pump innovations for villages",
-        "Affordable internet access solutions",
-        "Digital skills training for youth",
-        "Building a website with limited resources",
-        "How to secure your applications properly",
-        "SEO best practices for businesses",
-        "Responsive web design principles explained",
-        "Debugging code efficiently as a developer",
-        "Version control with Git for beginners",
-        "Database design for scalable applications",
-        "API development best practices and security",
-        "How to write clean maintainable code",
-        "Testing software effectively on a budget",
-        "Cloud deployment for startups",
-        "Cybersecurity basics for small businesses",
-        "Open source contribution for developers",
-        "Building mobile apps with frameworks",
-        "Programming for data science beginners",
+        "mobile technology", "renewable energy", "local innovations",
+        "digital skills", "appropriate technology", "solar solutions",
+        "tech education", "innovation hubs", "tech for agriculture",
+        "mobile money systems",
     ],
-    "Music & Dance": [
-        "Highlife music origins",
-        "Afrobeat development and influence",
-        "Traditional drumming patterns",
-        "Mbira music traditions",
-        "Kora playing techniques",
-        "Dance music from Central Africa",
-        "Music traditions of East Africa",
-        "Music of North Africa history",
-        "Gospel music development",
-        "Hiplife music genre explained",
-        "Traditional dance costumes and meanings",
-        "How drums are made from local materials",
-        "Call and response singing traditions",
-        "The role of music in ceremonies",
-        "Modern music production techniques",
-    ],
-    "Sports & Games": [
-        "Board game rules and strategy",
-        "Traditional wrestling",
-        "How football became popular",
-        "Jumping games played by children",
-        "Running traditions of communities",
-        "Stone games played in Southern Africa",
-        "Traditional archery practices",
-        "Canoe racing in coastal communities",
-        "How children make their own toys",
-        "The history of athletes in Olympics",
+    "Business & Finance": [
+        "small business tips", "market trading", "savings groups",
+        "cooperative business", "financial literacy", "entrepreneurship",
+        "local manufacturing", "import export", "business planning",
+        "customer service",
     ],
     "Environment & Nature": [
-        "Protecting forests from illegal logging",
-        "Wildlife conservation efforts",
-        "The importance of mangroves for coastal protection",
-        "Desertification prevention in dry regions",
-        "Traditional water conservation methods",
-        "Medicinal plants found in forests",
-        "Climate change effects on farming",
-        "Protecting endangered species",
-        "Community-led conservation success stories",
-        "The Great Green Wall project",
+        "forest conservation", "water management", "wildlife protection",
+        "climate adaptation", "sustainable practices", "renewable resources",
+        "waste management", "land restoration", "coastal protection",
+        "biodiversity",
     ],
-    "Governance & Leadership": [
-        "Traditional chieftaincy systems",
-        "Conflict resolution in communities",
-        "The role of elders in village governance",
-        "Women in leadership positions",
-        "How local councils make decisions",
-        "Traditional justice systems and reconciliation",
-        "Community organizing for local development",
-        "The role of youth in politics",
-        "Transparency and accountability in governance",
-        "How citizens can participate in local government",
+    "Music & Dance": [
+        "traditional instruments", "dance styles", "musical traditions",
+        "drumming patterns", "ceremonial music", "folk songs",
+        "music education", "dance costumes", "modern fusion music",
+        "music production",
     ],
-    "Religion & Spirituality": [
-        "Traditional religious beliefs explained",
-        "The role of ancestors in spirituality",
-        "How religions spread across Africa",
-        "Religious history and practice",
-        "Traditional prayer methods and offerings",
-        "Sacred sites and their significance",
-        "Spiritual healing practices",
-        "Festivals and religious celebrations",
-        "The role of diviners in traditional society",
-        "Religious tolerance in multi-faith communities",
-    ],
-    "Science & Innovation": [
-        "Contributions to mathematics history",
-        "Traditional astronomy knowledge",
-        "Indigenous engineering techniques",
-        "Local innovations in water purification",
-        "Scientists who changed the world",
-        "Traditional weather prediction methods",
-        "Natural dye making from local plants",
-        "How blacksmiths worked with iron",
-        "Innovations in affordable housing",
-        "Research happening today",
-    ],
-    "Fashion & Textiles": [
-        "Symbols and their meanings on cloth",
-        "Batik fabric making techniques",
-        "Mud cloth traditions",
-        "How traditional cloth is designed and woven",
-        "Fabric weaving traditions",
-        "Fabric patterns of East Africa",
-        "Leather working traditions",
-        "Beadwork traditions",
-        "Modern fashion designers making impact",
-        "How to tie a headwrap",
-    ],
-    "Arts & Crafts": [
-        "Wood carving traditions",
-        "Pottery making techniques in villages",
-        "Basket weaving from local grasses",
-        "Calabash decoration and carving art",
-        "Bronze casting techniques",
-        "Rock art and ancient paintings",
-        "Jewelry making from recycled materials",
-        "Mask carving and ceremonial uses",
-        "How to make traditional instruments",
-        "Contemporary art movements today",
-    ],
-    "Tourism & Travel": [
-        "Must-visit historical sites",
-        "Wildlife safari destinations",
-        "Beach destinations along the coast",
-        "Mountain climbing travel tips",
-        "Cultural festivals to experience",
-        "Budget travel tips for exploring",
-        "Eco-tourism opportunities in villages",
-        "World Heritage sites",
-        "How to travel safely between countries",
-        "Best times to visit different regions",
+    "Sports & Games": [
+        "traditional games", "wrestling traditions", "board games",
+        "children's games", "sports history", "running traditions",
+        "community sports", "school sports", "indigenous games",
+        "modern athletics",
     ],
     "Language & Proverbs": [
-        "Common proverbs and their deep meanings",
-        "Proverbs about wisdom and life",
-        "Proverbs about patience and success",
-        "Proverbs about community and unity",
-        "Proverbs about hard work and honesty",
-        "How proverbs teach children values",
-        "The art of indirect communication",
-        "Greetings in different languages",
-        "How tone changes meaning in languages",
-        "Preserving endangered languages today",
-        "Proverbs about leadership and governance",
-        "Wisdom sayings from elders",
-        "Proverbs about family and community",
-        "Ancient wisdom literature",
-        "Proverbs and their meanings",
+        "proverb meanings", "language preservation", "greeting customs",
+        "oral traditions", "naming practices", "communication styles",
+        "poetry forms", "storytelling language", "indigenous languages",
+        "wisdom sayings",
+    ],
+    "Religion & Spirituality": [
+        "traditional beliefs", "religious practices", "sacred sites",
+        "spiritual healing", "festival celebrations", "ancestral veneration",
+        "divination practices", "religious tolerance", "creation stories",
+        "moral teachings",
+    ],
+    "Arts & Crafts": [
+        "weaving techniques", "pottery making", "wood carving",
+        "basket weaving", "jewelry making", "textile design",
+        "mask carving", "metalworking", "beadwork", "leather craft",
+    ],
+    "Fashion & Textiles": [
+        "fabric dyeing", "weaving patterns", "traditional dress",
+        "textile history", "clothing customs", "fashion design",
+        "headwrap styles", "embroidery", "batik making", "kente weaving",
+    ],
+    "Tourism & Travel": [
+        "historical sites", "natural attractions", "cultural festivals",
+        "eco-tourism", "travel tips", "local guides", "heritage sites",
+        "market visits", "adventure travel", "community tourism",
+    ],
+    "Governance & Leadership": [
+        "traditional leadership", "community organizing", "conflict resolution",
+        "chieftaincy systems", "local governance", "women in leadership",
+        "youth participation", "consensus building", "justice systems",
+        "public participation",
     ],
     "Family & Relationships": [
-        "Extended family systems",
-        "How marriages are arranged traditionally",
-        "Raising respectful children in modern times",
-        "The role of grandparents in child upbringing",
-        "Resolving family conflicts the traditional way",
-        "Bride price and its cultural significance",
-        "Polygamy in traditional context",
-        "How communities support widows and orphans",
-        "Teaching values to the younger generation",
-        "Modern dating versus traditional courtship",
+        "parenting practices", "marriage customs", "elder care",
+        "family structures", "child upbringing", "community support",
+        "conflict mediation", "relationship advice", "family values",
+        "intergenerational knowledge",
+    ],
+    "Science & Innovation": [
+        "indigenous knowledge", "local inventions", "traditional astronomy",
+        "natural mathematics", "weather prediction", "engineering techniques",
+        "agricultural science", "medical innovations", "water technology",
+        "energy solutions",
     ],
 }
 
-TECH_TOPICS = [
-    ("Programming best practices for beginners", "Technology & Innovation"),
-    ("Async programming explained simply", "Technology & Innovation"),
-    ("How to write clean code", "Technology & Innovation"),
-    ("Form handling and validation techniques", "Technology & Innovation"),
-    ("Object oriented programming concepts", "Technology & Innovation"),
-    ("Development fundamentals", "Technology & Innovation"),
-    ("Web development guide", "Technology & Innovation"),
-    ("Concurrency patterns explained", "Technology & Innovation"),
-    ("Memory safety features", "Technology & Innovation"),
-    ("Type system advantages", "Technology & Innovation"),
-    ("Database query optimization techniques", "Technology & Innovation"),
-    ("App development basics", "Technology & Innovation"),
-    ("Application development guide", "Technology & Innovation"),
-    ("Mobile app development", "Technology & Innovation"),
-    ("Memory management techniques", "Technology & Innovation"),
-    ("Functional programming introduction", "Technology & Innovation"),
-    ("Statistical analysis guide", "Technology & Innovation"),
-    ("Numerical computing tutorial", "Technology & Innovation"),
-    ("Scripting language text processing", "Technology & Innovation"),
-    ("Functional programming concepts", "Technology & Innovation"),
-    ("Web framework tutorial", "Technology & Innovation"),
-    ("Concurrent programming model", "Technology & Innovation"),
-    ("Scripting for embedded systems", "Technology & Innovation"),
-    ("Programming for scientific computing", "Technology & Innovation"),
-    ("Shell scripting automation guide", "Technology & Innovation"),
-    ("Version control branching strategies", "Technology & Innovation"),
-    ("Container deployment best practices", "Technology & Innovation"),
-    ("API design principles and security", "Technology & Innovation"),
-    ("Database normalization and design patterns", "Technology & Innovation"),
-    ("Cybersecurity basics for applications", "Technology & Innovation"),
-]
 
-WEB_TOPICS = [
-    ("Semantic elements accessibility guide", "Technology & Innovation"),
-    ("Flexbox layout complete tutorial", "Technology & Innovation"),
-    ("Grid responsive design techniques", "Technology & Innovation"),
-    ("DOM manipulation explained", "Technology & Innovation"),
-    ("Event handling and delegation", "Technology & Innovation"),
-    ("Web accessibility roles and attributes", "Technology & Innovation"),
-    ("Animations and transitions guide", "Technology & Innovation"),
-    ("Responsive design mobile first approach", "Technology & Innovation"),
-    ("Forms validation and submission", "Technology & Innovation"),
-    ("Fetch API and promises tutorial", "Technology & Innovation"),
-    ("Custom properties and variables guide", "Technology & Innovation"),
-    ("Web performance optimization techniques", "Technology & Innovation"),
-    ("Progressive web apps development guide", "Technology & Innovation"),
-    ("Service workers for offline applications", "Technology & Innovation"),
-]
+# ===========================================================================
+# State File Operations
+# ===========================================================================
+
+def _github_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    return headers
 
 
-# ============================================================
-# Source: Wikipedia API
-# ============================================================
+def load_state() -> Dict:
+    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+        return {}
+    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=15)
+        if response.status_code == 200:
+            content_b64 = response.json().get("content", "")
+            if content_b64:
+                decoded = base64.b64decode(content_b64).decode("utf-8")
+                return json.loads(decoded)
+    except Exception as e:
+        print(f"  [State] Load failed: {e}")
+    return {}
 
-def search_wikipedia(topic: str) -> Optional[str]:
-    print(f"    [Wikipedia] Searching: {topic[:60]}...")
+
+def save_state(state: Dict) -> bool:
+    if not GITHUB_TOKEN or not GITHUB_KNOWLEDGE_REPO:
+        return False
+    content_json = json.dumps(state, indent=2, default=str)
+    url = f"{GITHUB_API}/repos/{GITHUB_KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    sha = ""
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=10)
+        if response.status_code == 200:
+            sha = response.json().get("sha", "")
+    except Exception:
+        pass
+    payload = {
+        "message": f"Update scraper state: {SCRAPER_NAME}",
+        "content": base64.b64encode(content_json.encode("utf-8")).decode("utf-8"),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        response = requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+        return response.status_code in [200, 201]
+    except Exception as e:
+        print(f"  [State] Save error: {e}")
+    return False
+
+
+def get_last_topics(state: Dict, count: int = 30) -> List[str]:
+    return state.get(SCRAPER_NAME, {}).get("last_topics", [])[-count:]
+
+
+def get_scraped_urls(state: Dict) -> List[str]:
+    return state.get(SCRAPER_NAME, {}).get("scraped_urls", [])
+
+
+def record_submission(state: Dict, topic: str, url: str, success: bool) -> Dict:
+    if SCRAPER_NAME not in state:
+        state[SCRAPER_NAME] = {
+            "last_topics": [], "scraped_urls": [], "last_run": "",
+            "total_submitted": 0, "total_failed": 0,
+        }
+    scraper = state[SCRAPER_NAME]
+    scraper["last_topics"].append(topic)
+    if len(scraper["last_topics"]) > 100:
+        scraper["last_topics"] = scraper["last_topics"][-100:]
+    if url and url not in scraper.setdefault("scraped_urls", []):
+        scraper["scraped_urls"].append(url)
+    if len(scraper.get("scraped_urls", [])) > 200:
+        scraper["scraped_urls"] = scraper["scraped_urls"][-200:]
+    if success:
+        scraper["total_submitted"] = scraper.get("total_submitted", 0) + 1
+    else:
+        scraper["total_failed"] = scraper.get("total_failed", 0) + 1
+    scraper["last_run"] = datetime.now(timezone.utc).isoformat()
+    return state
+
+
+# ===========================================================================
+# Category Weighting
+# ===========================================================================
+
+def pick_category() -> str:
+    """Pick a category, weighted toward focus categories if set."""
+    if FOCUS_CATEGORIES:
+        return random.choice(FOCUS_CATEGORIES)
+    return random.choice(ALL_CATEGORIES)
+
+
+def pick_topic_for_category(category: str, state: Dict) -> str:
+    """Pick a topic seed for a category, avoiding recent topics."""
+    seeds = CATEGORY_SEEDS.get(category, ["general knowledge"])
+    last_topics = get_last_topics(state, 30)
+
+    # Try to find a seed that hasn't been used recently
+    for seed in random.sample(seeds, len(seeds)):
+        if seed not in last_topics:
+            # Add a random qualifier for variation
+            qualifiers = [
+                "in rural communities", "in urban areas", "across West Africa",
+                "in East Africa", "traditional methods of", "modern approaches to",
+                "sustainable", "community-based", "practical guide to",
+                "history of", "cultural significance of", "step-by-step",
+                "common mistakes in", "benefits of", "challenges of",
+            ]
+            qualifier = random.choice(qualifiers)
+            return f"{qualifier} {seed}"
+
+    # Fallback: use a random seed
+    return f"{random.choice(qualifiers)} {random.choice(seeds)}"
+
+
+# ===========================================================================
+# Web Sources
+# ===========================================================================
+
+def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
+    """Search Wikipedia. Returns (content, source_url) or None."""
+    print(f"    [Wikipedia] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            "action": "query", "list": "search", "srsearch": topic,
-            "format": "json", "srlimit": 1,
-        }
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
+        params = {"action": "query", "list": "search", "srsearch": topic, "format": "json", "srlimit": 1}
+        headers = {"User-Agent": "KnowledgePipeline/2.0"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
         data = response.json()
-        search_results = data.get("query", {}).get("search", [])
-        if not search_results:
+        results = data.get("query", {}).get("search", [])
+        if not results:
             return None
-        page_title = search_results[0]["title"]
-        extract_params = {
-            "action": "query", "prop": "extracts", "exintro": True,
-            "explaintext": True, "titles": page_title, "format": "json",
-        }
+        page_title = results[0]["title"]
+        extract_params = {"action": "query", "prop": "extracts", "exintro": True, "explaintext": True, "titles": page_title, "format": "json"}
         response = requests.get(search_url, params=extract_params, headers=headers, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
         data = response.json()
         pages = data.get("query", {}).get("pages", {})
-        for page_id, page_data in pages.items():
+        for page_data in pages.values():
             extract = page_data.get("extract", "")
             if extract and len(extract) > 300:
-                print(f"    Got {len(extract)} characters")
-                sys.stdout.flush()
-                return extract[:3000]
+                url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
+                return extract[:3000], url
         return None
     except Exception as e:
-        print(f"    Wikipedia error: {str(e)[:100]}")
-        sys.stdout.flush()
+        print(f"    Wikipedia error: {e}")
         return None
 
 
-# ============================================================
-# Source: Wikisource API
-# ============================================================
-
-def search_wikisource(topic: str) -> Optional[str]:
-    print(f"    [Wikisource] Searching: {topic[:60]}...")
-    sys.stdout.flush()
-    try:
-        search_url = "https://en.wikisource.org/w/api.php"
-        params = {
-            "action": "query", "list": "search", "srsearch": topic,
-            "format": "json", "srlimit": 1,
-        }
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
-        response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        search_results = data.get("query", {}).get("search", [])
-        if not search_results:
-            return None
-        page_title = search_results[0]["title"]
-        extract_params = {
-            "action": "query", "prop": "extracts", "exintro": True,
-            "explaintext": True, "titles": page_title, "format": "json",
-        }
-        response = requests.get(search_url, params=extract_params, headers=headers, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        pages = data.get("query", {}).get("pages", {})
-        for page_id, page_data in pages.items():
-            extract = page_data.get("extract", "")
-            if extract and len(extract) > 200:
-                print(f"    Got {len(extract)} characters")
-                sys.stdout.flush()
-                return extract[:3000]
-        return None
-    except Exception as e:
-        print(f"    Wikisource error: {str(e)[:100]}")
-        sys.stdout.flush()
-        return None
-
-
-# ============================================================
-# Source: UN FAO API
-# ============================================================
-
-def search_fao(topic: str) -> Optional[str]:
-    agriculture_keywords = [
-        "farm", "agriculture", "crop", "livestock", "soil", "harvest",
-        "irrigation", "poultry", "fishing", "cocoa", "maize", "rice",
-        "cassava", "yam", "millet", "sorghum", "coffee", "banana",
-        "palm oil", "shea", "groundnut", "cotton", "beekeeping",
-    ]
-    if not any(kw in topic.lower() for kw in agriculture_keywords):
-        return None
-    print(f"    [FAO] Searching: {topic[:60]}...")
-    sys.stdout.flush()
-    try:
-        search_url = "https://agris.fao.org/agris-search/search"
-        params = {"query": topic, "format": "json", "limit": 1}
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
-        response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        results = data.get("results", [])
-        if not results:
-            return None
-        for result in results:
-            title = result.get("title", "")
-            abstract = result.get("abstract", "")
-            combined = f"{title}. {abstract}"
-            if len(combined) > 300:
-                print(f"    Got {len(combined)} characters")
-                sys.stdout.flush()
-                return combined[:3000]
-        return None
-    except Exception as e:
-        print(f"    FAO error: {str(e)[:100]}")
-        return None
-
-
-# ============================================================
-# Source: Project Gutenberg
-# ============================================================
-
-def search_gutenberg(topic: str) -> Optional[str]:
-    relevant_keywords = [
-        "history", "empire", "kingdom", "folktale", "proverb", "wisdom",
-        "ancient", "traditional", "oral", "story", "civilization",
-        "colonial", "independence", "king", "queen", "legend",
-    ]
-    if not any(kw in topic.lower() for kw in relevant_keywords):
-        return None
-    print(f"    [Gutenberg] Searching: {topic[:60]}...")
-    sys.stdout.flush()
-    try:
-        search_url = "https://gutendex.com/books"
-        params = {"search": topic, "languages": "en"}
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
-        response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        results = data.get("results", [])
-        if not results:
-            return None
-        for book in results:
-            title = book.get("title", "")
-            subjects = book.get("subjects", [])
-            parts = [title]
-            if subjects:
-                parts.append("Subjects: " + ", ".join(subjects[:5]))
-            combined = ". ".join(parts)
-            if len(combined) > 200:
-                print(f"    Got {len(combined)} characters")
-                sys.stdout.flush()
-                return combined[:3000]
-        return None
-    except Exception as e:
-        print(f"    Gutenberg error: {str(e)[:100]}")
-        return None
-
-
-# ============================================================
-# Source: Stack Exchange API
-# ============================================================
-
-def search_stackexchange(topic: str) -> Optional[str]:
-    tech_keywords = [
-        "programming", "code", "software", "developer", "web", "app",
-        "database", "server", "API", "framework", "JavaScript", "Python",
-        "Java", "PHP", "Ruby", "HTML", "CSS", "SQL", "C++", "C#",
-        "security", "deployment", "testing", "debugging", "algorithm",
-    ]
-    if not any(kw.lower() in topic.lower() for kw in tech_keywords):
-        return None
-    print(f"    [StackExchange] Searching: {topic[:60]}...")
+def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
+    """Search Stack Exchange. Returns (content, source_url) or None."""
+    print(f"    [StackExchange] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://api.stackexchange.com/2.3/search/advanced"
-        params = {
-            "order": "desc", "sort": "votes", "q": topic,
-            "site": "stackoverflow", "pagesize": 1, "filter": "withbody",
-        }
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
+        params = {"order": "desc", "sort": "votes", "q": topic, "site": "stackoverflow", "pagesize": 1, "filter": "withbody"}
+        headers = {"User-Agent": "KnowledgePipeline/2.0"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
-        data = response.json()
-        items = data.get("items", [])
+        items = response.json().get("items", [])
         if not items:
             return None
-        for item in items:
-            title = item.get("title", "")
-            body = item.get("body", "")
-            body_clean = re.sub(r'<[^>]+>', ' ', body)
-            body_clean = re.sub(r'\s+', ' ', body_clean).strip()
-            combined = f"Question: {title}. {body_clean[:800]}."
-            if len(combined) > 300:
-                print(f"    Got {len(combined)} characters")
-                sys.stdout.flush()
-                return combined[:3000]
+        item = items[0]
+        title = item.get("title", "")
+        body = re.sub(r'<[^>]+>', ' ', item.get("body", ""))
+        body = re.sub(r'\s+', ' ', body).strip()
+        combined = f"{title}. {body[:800]}"
+        if len(combined) > 300:
+            url = item.get("link", "")
+            return combined[:3000], url
         return None
     except Exception as e:
-        print(f"    StackExchange error: {str(e)[:100]}")
+        print(f"    StackExchange error: {e}")
         return None
 
 
-# ============================================================
-# Source: MDN Web Docs
-# ============================================================
-
-def search_mdn(topic: str) -> Optional[str]:
-    web_keywords = [
-        "HTML", "CSS", "JavaScript", "DOM", "accessibility", "responsive",
-        "Flexbox", "Grid", "animation", "transition", "event", "fetch",
-    ]
-    if not any(kw.lower() in topic.lower() for kw in web_keywords):
-        return None
-    print(f"    [MDN] Searching: {topic[:60]}...")
+def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
+    """Search MDN Web Docs. Returns (content, source_url) or None."""
+    print(f"    [MDN] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://developer.mozilla.org/api/v1/search"
         params = {"q": topic, "locale": "en-US"}
-        headers = {"User-Agent": "KnowledgePipeline/1.0"}
+        headers = {"User-Agent": "KnowledgePipeline/2.0"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
-        data = response.json()
-        documents = data.get("documents", [])
+        documents = response.json().get("documents", [])
         if not documents:
             return None
-        for doc in documents[:1]:
-            title = doc.get("title", "")
-            summary = doc.get("summary", "")
-            combined = f"{title}. {summary}"
-            if len(combined) > 300:
-                print(f"    Got {len(combined)} characters")
-                sys.stdout.flush()
-                return combined[:3000]
+        doc = documents[0]
+        combined = f"{doc.get('title', '')}. {doc.get('summary', '')}"
+        if len(combined) > 300:
+            url = f"https://developer.mozilla.org{doc.get('mdn_url', '')}"
+            return combined[:3000], url
         return None
     except Exception as e:
-        print(f"    MDN error: {str(e)[:100]}")
+        print(f"    MDN error: {e}")
         return None
 
 
-# ============================================================
-# Source: GitHub Repos
-# ============================================================
-
-def search_github(topic: str) -> Optional[str]:
-    tech_keywords = [
-        "programming", "code", "software", "framework", "library",
-        "language", "tutorial", "guide", "example", "template",
-    ]
-    if not any(kw.lower() in topic.lower() for kw in tech_keywords):
-        return None
-    print(f"    [GitHub] Searching: {topic[:60]}...")
-    sys.stdout.flush()
-    try:
-        search_url = "https://api.github.com/search/repositories"
-        params = {"q": topic, "sort": "stars", "order": "desc", "per_page": 1}
-        headers = {
-            "User-Agent": "KnowledgePipeline/1.0",
-            "Accept": "application/vnd.github.v3+json",
-        }
-        if GITHUB_TOKEN:
-            headers["Authorization"] = f"token {GITHUB_TOKEN}"
-        response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        items = data.get("items", [])
-        if not items:
-            return None
-        for repo in items[:1]:
-            description = repo.get("description", "")
-            full_name = repo.get("full_name", "")
-            language = repo.get("language", "")
-            combined = f"Repository: {full_name}. Language: {language}. Description: {description}."
-            if len(combined) > 200:
-                print(f"    Got {len(combined)} characters")
-                sys.stdout.flush()
-                return combined[:3000]
-        return None
-    except Exception as e:
-        print(f"    GitHub error: {str(e)[:100]}")
-        return None
-
-
-# ============================================================
-# Content Rewriter
-# ============================================================
-
-def rewrite_content(original_text: str, topic: str, category: str) -> str:
-    personal_starters = [
-        "In my community, we", "My grandmother taught me that",
-        "Growing up, I learned that", "Many people in our region believe that",
-        "From my experience,", "Elders in our area say that",
-        "I remember my father telling me", "In our tradition,",
-        "Local farmers have always known that", "Through generations, we have",
-        "As a developer, I know that", "In my years of practice, I have found that",
-        "Our community has always believed that", "I learned from my mentor that",
-    ]
-    starter = random.choice(personal_starters)
-    sentences = re.split(r'(?<=[.!?])\s+', original_text)
-    key_sentences = []
-    for sentence in sentences[:8]:
-        clean = sentence.strip()
-        if len(clean) > 20 and len(clean) < 500:
-            key_sentences.append(clean)
-    if not key_sentences:
-        return ""
-    rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
-    for sentence in key_sentences[1:5]:
-        rewritten += f"{sentence}\n\n"
-    conclusions = [
-        f"This knowledge has been passed down through generations.",
-        f"I share this because it's important for the next generation.",
-        f"This is what works for us. I hope it helps others too.",
-        f"I hope this knowledge helps someone else.",
-    ]
-    rewritten += random.choice(conclusions)
-    if len(rewritten) < 200:
-        rewritten += f"\n\nThis is knowledge that matters in daily life. I am sharing what I know so others can benefit."
-    return rewritten[:50000]
-
-
-# ============================================================
-# Multi-Source Content Fetcher
-# ============================================================
-
-def fetch_content(topic: str, category: str) -> Optional[str]:
-    sources = [search_wikipedia, search_wikisource, search_fao, search_gutenberg,
-               search_stackexchange, search_mdn, search_github]
+def fetch_content(topic: str, state: Dict) -> Optional[Tuple[str, str]]:
+    """
+    Try multiple sources for a topic.
+    Returns (content, source_url) or None.
+    Skips previously scraped URLs.
+    """
+    scraped_urls = get_scraped_urls(state)
+    sources = [search_wikipedia, search_stackexchange, search_mdn]
     random.shuffle(sources)
+
     for source_func in sources:
         result = source_func(topic)
         if result:
-            return result
+            content, url = result
+            if url not in scraped_urls:
+                return content, url
     return None
 
 
-# ============================================================
-# Training Form Submission
-# ============================================================
+# ===========================================================================
+# Content Rewriting
+# ===========================================================================
 
-def submit_to_form(topic: str, category: str, knowledge: str,
-                   region: str = "Various regions", language: str = "English") -> bool:
+def rewrite_content(original: str, topic: str, category: str) -> str:
+    """
+    Rewrite scraped content in a conversational first-person voice.
+    Uses randomized personal starters and one of three rewrite styles.
+    """
+    personal_starters = [
+        "In my community, we", "Growing up, I learned that",
+        "My grandmother taught me that", "Many people in our region believe",
+        "From my experience,", "Elders in our area say",
+        "I remember my father telling me", "In our tradition,",
+        "Local farmers have always known", "Through generations, we have",
+        "My mentor once told me", "I've seen with my own eyes how",
+        "People in my village say", "The old way of doing things",
+        "What I know about this is", "I learned this the hard way:",
+        "A wise person once told me", "In the market, everyone knows",
+        "Our ancestors passed down this knowledge:",
+        "If you ask any elder, they'll tell you",
+        "Through trial and error, I discovered",
+        "The secret that nobody tells you is",
+        "Here in our part of the world, we",
+        "My uncle who has done this for 40 years says",
+        "The difference between success and failure is",
+        "What most people don't understand is",
+        "I wish someone had told me earlier that",
+        "After years of doing this, I can say",
+        "The real trick to making this work is",
+        "Nobody teaches you this in school, but",
+    ]
+
+    conclusions = [
+        "This knowledge has been passed down through generations.",
+        "I share this because it's important for the next generation.",
+        "This is what works for us. I hope it helps others too.",
+        "I hope this knowledge helps someone else.",
+        "That's the wisdom I've gathered over the years.",
+        "May this knowledge serve you well.",
+        "These are lessons learned from real life, not books.",
+        "I'm sharing this so the knowledge doesn't get lost.",
+        "The old ways have wisdom that modern life forgets.",
+        "Take this advice and make it your own.",
+    ]
+
+    starter = random.choice(personal_starters)
+    sentences = re.split(r'(?<=[.!?])\s+', original)
+    key_sentences = [s.strip() for s in sentences[:8] if 20 < len(s.strip()) < 500]
+
+    if not key_sentences:
+        return ""
+
+    style = random.choice(["narrative", "instructional", "comparative"])
+
+    if style == "narrative":
+        rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
+        for sentence in key_sentences[1:5]:
+            rewritten += f"{sentence}\n\n"
+    elif style == "instructional":
+        rewritten = f"{starter}\n\n"
+        for i, sentence in enumerate(key_sentences[:5], 1):
+            rewritten += f"{i}. {sentence}\n\n"
+    else:  # comparative
+        rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
+        if len(key_sentences) >= 3:
+            rewritten += f"On one hand, {key_sentences[1].lower()}\n\n"
+            rewritten += f"On the other hand, {key_sentences[2].lower()}\n\n"
+        for sentence in key_sentences[3:5]:
+            rewritten += f"{sentence}\n\n"
+
+    rewritten += random.choice(conclusions)
+
+    if len(rewritten) < 200:
+        rewritten += "\n\nThis is knowledge that matters in daily life. I am sharing what I know so others can benefit."
+
+    return rewritten[:50000]
+
+
+# ===========================================================================
+# Submission
+# ===========================================================================
+
+def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
+    """Submit to training form. Returns (success, submission_id)."""
     session = requests.Session()
     try:
-        print(f"    Fetching form page...")
+        print(f"    Fetching form...")
         sys.stdout.flush()
         form_response = session.get(TRAINING_FORM_URL, timeout=REQUEST_TIMEOUT)
         if form_response.status_code != 200:
-            print(f"    ERROR: Form returned {form_response.status_code}")
-            return False
+            return False, ""
         html = form_response.text
+
         csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
         if not csrf_match:
-            return False
+            return False, ""
         csrf_token = csrf_match.group(1)
+
         code_match = re.search(r'verification-code[^>]*>(\d{6})<', html)
         if not code_match:
-            return False
+            return False, ""
         verification_code = code_match.group(1)
+
         app_check_token = SCRAPER_API_KEY if SCRAPER_API_KEY else ""
-        print(f"    Code: {verification_code}")
+
         submit_data = {
             "topic": topic, "category": category, "knowledge": knowledge,
-            "region": region, "language": language, "email": "",
+            "region": "Various regions", "language": "English", "email": "",
             "verification_code": verification_code, "csrf_token": csrf_token,
             "app_check_token": app_check_token, "copyright_confirm": "on",
         }
+
         print(f"    Submitting...")
         sys.stdout.flush()
         submit_response = session.post(
             f"{TRAINING_FORM_URL}/submit", data=submit_data,
             timeout=REQUEST_TIMEOUT, allow_redirects=True,
         )
-        if "Thank You" in submit_response.text or submit_response.status_code == 200:
+
+        if submit_response.status_code == 200:
             id_match = re.search(r'GHGPT-\d{4}-\d{4}', submit_response.text)
             submission_id = id_match.group(0) if id_match else "unknown"
             print(f"    Submitted! ID: {submission_id}")
             sys.stdout.flush()
-            return True
+            return True, submission_id
         else:
             print(f"    Failed. Status: {submit_response.status_code}")
-            return False
+            return False, ""
     except Exception as e:
-        print(f"    ERROR: {str(e)[:200]}")
-        return False
+        print(f"    ERROR: {e}")
+        return False, ""
 
 
-# ============================================================
-# Main Loop
-# ============================================================
+# ===========================================================================
+# Main
+# ===========================================================================
 
-def run_scraper(max_submissions: int = 4):
+def run_scraper(max_submissions: int = 10):
+    """Main scraper loop with state, category awareness, and source variation."""
     print("=" * 60)
-    print("Open Knowledge Pipeline — Web Scraper")
+    print(f"Web Scraper v2.0 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
-    print(f"Rate bypass: {'ACTIVE' if SCRAPER_API_KEY else 'INACTIVE'}")
+    print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
+    print(f"State: {'ENABLED' if GITHUB_TOKEN else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
+
+    state = load_state()
+    print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
+
     submission_count = 0
     skipped = 0
     failed = 0
-    all_topics = []
-    for category, topics in TOPICS.items():
-        for topic in topics:
-            all_topics.append((topic, category))
-    for topic, category in TECH_TOPICS:
-        all_topics.append((topic, category))
-    for topic, category in WEB_TOPICS:
-        all_topics.append((topic, category))
-    random.shuffle(all_topics)
-    for topic, category in all_topics:
+
+    for i in range(max_submissions * 3):  # Try up to 3x to account for skips
         if submission_count >= max_submissions:
             break
-        print(f"\n[{submission_count + 1}/{max_submissions}] Topic: {topic}")
+
+        print(f"\n[{submission_count + 1}/{max_submissions}] Selecting topic...")
         sys.stdout.flush()
-        original_text = fetch_content(topic, category)
-        if not original_text:
+
+        category = pick_category()
+        topic = pick_topic_for_category(category, state)
+        print(f"  Topic: {topic}")
+        print(f"  Category: {category}")
+        sys.stdout.flush()
+
+        # Fetch content
+        result = fetch_content(topic, state)
+        if not result:
             skipped += 1
+            print(f"  No content found, skipping")
             continue
+
+        original_text, source_url = result
+        print(f"  Source: {source_url[:80]}...")
+
+        # Rewrite
         rewritten = rewrite_content(original_text, topic, category)
         if len(rewritten) < 200:
             skipped += 1
+            print(f"  Rewrite too short ({len(rewritten)} chars), skipping")
             continue
-        success = submit_to_form(topic, category, rewritten)
+
+        print(f"  Content: {len(rewritten)} chars")
+        sys.stdout.flush()
+
+        # Submit
+        success, submission_id = submit_to_form(topic, category, rewritten)
+
         if success:
             submission_count += 1
+            state = record_submission(state, topic, source_url, True)
         else:
             failed += 1
+            state = record_submission(state, topic, source_url, False)
+
+        # Save state
+        if GITHUB_TOKEN:
+            save_state(state)
+
         if submission_count < max_submissions:
-            wait_time = SUBMISSION_DELAY + random.randint(1, 5)
+            wait_time = SUBMISSION_DELAY + random.randint(1, 15)
+            print(f"  Waiting {wait_time}s...")
+            sys.stdout.flush()
             time.sleep(wait_time)
+
     print("\n" + "=" * 60)
-    print(f"Done: {submission_count} | Skipped: {skipped} | Failed: {failed}")
+    print(f"Done: {submission_count} submitted | {skipped} skipped | {failed} failed")
     print("=" * 60)
 
 
@@ -907,11 +610,11 @@ if __name__ == "__main__":
     if is_automated:
         count = SUBMISSIONS_PER_RUN
     else:
-        confirm = input(f"\nHow many submissions? (default 4): ").strip()
+        confirm = input(f"\nHow many submissions? (default {SUBMISSIONS_PER_RUN}): ").strip()
         try:
             count = int(confirm) if confirm else SUBMISSIONS_PER_RUN
         except ValueError:
             count = SUBMISSIONS_PER_RUN
-    print(f"\nStarting with {count} submissions target...\n")
+    print(f"\nStarting web scraper with {count} submissions...\n")
     sys.stdout.flush()
     run_scraper(max_submissions=count)
