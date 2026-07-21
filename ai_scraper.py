@@ -1,14 +1,15 @@
 """
-AI-Powered Knowledge Scraper — v2.0
+AI-Powered Knowledge Scraper — v2.1
 ====================================
 Generates unique knowledge content using AI APIs with:
 - Dynamic topic generation (no fixed lists)
 - 8 rotating prompt styles for variety
 - State file memory to avoid repeats
 - Category weighting toward thin categories
+- Markdown stripping for clean output
 - Deduplication feedback loop
 
-APIs: Groq (primary), Mistral (fallback)
+APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
 """
 
 import os
@@ -31,7 +32,7 @@ TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
-SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "4"))
+SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
 REQUEST_TIMEOUT = 60
 
@@ -70,12 +71,14 @@ PROMPT_STYLES = [
             "You are a patient teacher explaining things to a curious 15-year-old. "
             "Use simple words, real examples from daily life, and make it easy to understand. "
             "Write in first person as if sharing knowledge you learned from experience. "
-            "Be warm, encouraging, and practical. Never mention AI."
+            "Be warm, encouraging, and practical. Never mention AI. "
+            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores for bold or italics. "
+            "Write in plain text only."
         ),
         "user_template": (
             'Explain "{topic}" in simple terms. '
             "Use examples from everyday life. Make it easy for anyone to understand. "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -83,12 +86,14 @@ PROMPT_STYLES = [
         "system": (
             "You are an elder sharing wisdom gained through a lifetime of experience. "
             "Write in first person with warmth and authority. Share real stories and lessons. "
-            "Your knowledge comes from living, not books. Never mention AI."
+            "Your knowledge comes from living, not books. Never mention AI. "
+            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
+            "Write in plain text only."
         ),
         "user_template": (
             'Share your personal knowledge and experience about "{topic}". '
             "Tell stories from real life. What have you learned? What works? What doesn't? "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only — no markdown formatting."
         ),
     },
     {
@@ -96,12 +101,13 @@ PROMPT_STYLES = [
         "system": (
             "You are an analytical thinker who compares different approaches. "
             "Write in first person. Show pros and cons of different methods. "
-            "Be fair and balanced. Never mention AI."
+            "Be fair and balanced. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Compare different approaches to "{topic}". '
             "What are the pros and cons of each? Which works best in different situations? "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only."
         ),
     },
     {
@@ -109,12 +115,14 @@ PROMPT_STYLES = [
         "system": (
             "You are a skilled practitioner teaching a craft. "
             "Give clear, numbered steps. Explain WHY each step matters. "
-            "Write in first person. Be precise and practical. Never mention AI."
+            "Write in first person. Be precise and practical. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Provide a step-by-step guide for "{topic}". '
             "Number each step. Explain why each step is important. "
-            "Include practical tips from real experience. Write at least 550 words."
+            "Include practical tips from real experience. Write at least 250 words. "
+            "Use plain text only — no markdown."
         ),
     },
     {
@@ -122,12 +130,13 @@ PROMPT_STYLES = [
         "system": (
             "You are a historian who understands how things evolved over time. "
             "Trace origins and changes. Show how the past connects to the present. "
-            "Write in first person with rich detail. Never mention AI."
+            "Write in first person with rich detail. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Trace the history and evolution of "{topic}". '
             "How did it start? How has it changed? Where is it now? "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only."
         ),
     },
     {
@@ -135,12 +144,13 @@ PROMPT_STYLES = [
         "system": (
             "You are a seasoned expert who has seen people make every mistake possible. "
             "Share what goes wrong and how to avoid it. Be honest about failures. "
-            "Write in first person. Never mention AI."
+            "Write in first person. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'What are the most common mistakes people make with "{topic}"? '
             "Explain each mistake clearly. How can they be avoided? "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only."
         ),
     },
     {
@@ -148,12 +158,13 @@ PROMPT_STYLES = [
         "system": (
             "You are a well-traveled observer who notices how things differ across regions. "
             "Describe local variations and explain why they exist. "
-            "Write in first person with rich observation. Never mention AI."
+            "Write in first person with rich observation. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Describe how "{topic}" differs across regions in Africa. '
             "What are the local variations? Why do they exist? "
-            "Write at least 550 words."
+            "Write at least 250 words. Use plain text only."
         ),
     },
     {
@@ -161,14 +172,43 @@ PROMPT_STYLES = [
         "system": (
             "You are a forward-thinking expert who sees where things are heading. "
             "Discuss trends, challenges, and opportunities. Be realistic but hopeful. "
-            "Write in first person. Never mention AI."
+            "Write in first person. Never mention AI. "
+            "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
             'Where is "{topic}" heading? Discuss current trends, future challenges, '
-            "and what changes are coming. Write at least 550 words."
+            "and what changes are coming. Write at least 250 words. Use plain text only."
         ),
     },
 ]
+
+
+# ===========================================================================
+# Markdown Stripping
+# ===========================================================================
+
+def strip_markdown(text: str) -> str:
+    """
+    Remove all markdown formatting from AI-generated text.
+    Keeps the content, removes the formatting characters.
+    """
+    # Bold/italic: **text**, __text__, *text*, _text_
+    text = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}([^_]+?)_{1,3}', r'\1', text)
+    # Headers: ### Header, ## Header, # Header
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Bullet points: - item, * item
+    text = re.sub(r'^[\-\*]\s+', '', text, flags=re.MULTILINE)
+    # Numbered lists: 1. item -> 1. item (keep numbers, strip extra formatting)
+    # Code blocks: ```code```
+    text = re.sub(r'```[^`]*```', '', text)
+    # Inline code: `code`
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Horizontal rules
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Extra whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 # ===========================================================================
@@ -176,7 +216,6 @@ PROMPT_STYLES = [
 # ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
-    """Build headers for GitHub API requests."""
     headers = {"Accept": "application/vnd.github.v3+json"}
     if GH_TOKEN:
         headers["Authorization"] = f"token {GH_TOKEN}"
@@ -184,10 +223,6 @@ def _github_headers() -> Dict[str, str]:
 
 
 def load_state() -> Dict:
-    """
-    Load the scraper state file from the knowledge repo.
-    Returns empty dict if not found or on error.
-    """
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
@@ -204,15 +239,10 @@ def load_state() -> Dict:
 
 
 def save_state(state: Dict) -> bool:
-    """
-    Save the scraper state file to the knowledge repo.
-    Creates or updates the file.
-    """
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
     content_json = json.dumps(state, indent=2, default=str)
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
-
     sha = ""
     try:
         response = requests.get(url, headers=_github_headers(), timeout=10)
@@ -220,7 +250,6 @@ def save_state(state: Dict) -> bool:
             sha = response.json().get("sha", "")
     except Exception:
         pass
-
     payload = {
         "message": f"Update scraper state: {SCRAPER_NAME}",
         "content": base64.b64encode(content_json.encode("utf-8")).decode("utf-8"),
@@ -228,34 +257,23 @@ def save_state(state: Dict) -> bool:
     }
     if sha:
         payload["sha"] = sha
-
     try:
         response = requests.put(url, json=payload, headers=_github_headers(), timeout=15)
-        if response.status_code in [200, 201]:
-            print(f"  [State] Saved successfully")
-            return True
-        else:
-            print(f"  [State] Save failed: {response.status_code}")
+        return response.status_code in [200, 201]
     except Exception as e:
         print(f"  [State] Save error: {e}")
     return False
 
 
 def get_last_topics(state: Dict, count: int = 30) -> List[str]:
-    """Get the last N topics submitted by this scraper."""
-    scraper_state = state.get(SCRAPER_NAME, {})
-    return scraper_state.get("last_topics", [])[-count:]
+    return state.get(SCRAPER_NAME, {}).get("last_topics", [])[-count:]
 
 
 def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> Dict:
-    """Record a topic submission in the state."""
     if SCRAPER_NAME not in state:
         state[SCRAPER_NAME] = {
-            "last_topics": [],
-            "last_run": "",
-            "total_submitted": 0,
-            "total_failed": 0,
-            "rejected_topics": [],
+            "last_topics": [], "last_run": "", "total_submitted": 0,
+            "total_failed": 0, "rejected_topics": [],
         }
     scraper = state[SCRAPER_NAME]
     scraper["last_topics"].append(topic)
@@ -270,7 +288,6 @@ def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> 
 
 
 def record_rejected(state: Dict, topic: str) -> Dict:
-    """Record a topic that was rejected as duplicate."""
     if SCRAPER_NAME not in state:
         state[SCRAPER_NAME] = {"rejected_topics": [], "last_topics": [], "last_run": "", "total_submitted": 0, "total_failed": 0}
     state[SCRAPER_NAME].setdefault("rejected_topics", []).append(topic)
@@ -280,15 +297,10 @@ def record_rejected(state: Dict, topic: str) -> Dict:
 
 
 # ===========================================================================
-# Category Awareness — Count files per category folder
+# Category Awareness
 # ===========================================================================
 
 def get_category_counts() -> Dict[str, int]:
-    """
-    Count files in each category folder of the knowledge repo.
-    Returns dict of {category_name: file_count}.
-    Used to prioritize thin categories.
-    """
     category_slugs = {
         "Agriculture & Farming": "agriculture_farming",
         "Business & Finance": "business_finance",
@@ -329,10 +341,6 @@ def get_category_counts() -> Dict[str, int]:
 
 
 def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
-    """
-    Pick a category weighted toward thin ones.
-    Categories with fewer files get higher weight.
-    """
     if not focus:
         focus = ALL_CATEGORIES
     available = {cat: counts.get(cat, 0) for cat in focus if cat in counts}
@@ -351,11 +359,6 @@ def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
 # ===========================================================================
 
 def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
-    """
-    Ask the AI to generate a unique, specific topic.
-    Passes last 20 topics as negative examples.
-    Returns (topic_string, category_string).
-    """
     last_topics = get_last_topics(state, 20)
     rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-20:]
 
@@ -438,7 +441,6 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
 # ===========================================================================
 
 def generate_with_groq(topic: str, category: str, style: Dict) -> str:
-    """Generate content using Groq API."""
     if not GROQ_API_KEY:
         return ""
     print(f"    [Groq] Style: {style['name']}")
@@ -470,7 +472,6 @@ def generate_with_groq(topic: str, category: str, style: Dict) -> str:
 
 
 def generate_with_mistral(topic: str, category: str, style: Dict) -> str:
-    """Generate content using Mistral API (fallback)."""
     if not MISTRAL_API_KEY:
         return ""
     print(f"    [Mistral] Style: {style['name']}")
@@ -502,7 +503,6 @@ def generate_with_mistral(topic: str, category: str, style: Dict) -> str:
 
 
 def generate_content(topic: str, category: str) -> str:
-    """Generate content using available APIs with a random prompt style."""
     style = random.choice(PROMPT_STYLES)
 
     if GROQ_API_KEY:
@@ -523,10 +523,6 @@ def generate_content(topic: str, category: str) -> str:
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
-    """
-    Submit knowledge to the training form.
-    Returns (success: bool, submission_id: str).
-    """
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -581,10 +577,9 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 # Main
 # ===========================================================================
 
-def run_ai_scraper(max_submissions: int = 4):
-    """Main scraper loop with state, dynamic topics, and prompt variation."""
+def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.0 — {SCRAPER_NAME}")
+    print(f"AI Scraper v2.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
@@ -624,6 +619,10 @@ def run_ai_scraper(max_submissions: int = 4):
             state = record_topic(state, topic, "", False)
             continue
 
+        # Strip markdown formatting
+        knowledge = strip_markdown(knowledge)
+
+        # Strip AI disclaimers
         knowledge = re.sub(
             r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
             '', knowledge
