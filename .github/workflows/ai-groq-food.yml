@@ -1,0 +1,33 @@
+name: AI Scraper — Groq Food & Cuisine
+
+on:
+  schedule:
+    - cron: '15 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run AI scraper
+        env:
+          TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_KNOWLEDGE_REPO: ${{ secrets.GITHUB_KNOWLEDGE_REPO }}
+          SUBMISSIONS_PER_RUN: '4'
+          SUBMISSION_DELAY: '30'
+          SCRAPER_NAME: 'ai-groq-food'
+          FOCUS_CATEGORIES: 'Food & Cuisine,Agriculture & Farming,Health & Medicine'
+        run: python ai_scraper.py
