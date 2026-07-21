@@ -1,11 +1,15 @@
 """
-Web Knowledge Scraper — v2.1
+Web Knowledge Scraper — v2.2
 =============================
 Searches public domain sources for knowledge content with:
+- Wikipedia as primary source (most relevant)
+- StackExchange for tech topics only
+- MDN for web development topics only
+- Relevance gate — skips content not matching the topic
+- Higher length requirements for quality
 - State file memory to avoid repeating URLs and topics
 - Category awareness toward thin categories
 - Multiple rewrite styles for variety
-- Source rotation with randomized search queries
 
 Sources: Wikipedia, StackExchange, MDN Web Docs
 """
@@ -41,6 +45,11 @@ FOCUS_CATEGORIES = [c.strip() for c in FOCUS_CATEGORIES_RAW.split(",") if c.stri
 
 SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-scraper")
 STATE_FILE_PATH = "admin/scraper-state.json"
+
+# Quality thresholds
+MIN_SCRAPED_LENGTH = 500       # Minimum chars from source before we consider it
+MIN_REWRITTEN_LENGTH = 350     # Minimum chars after rewrite
+TARGET_REWRITTEN_LENGTH = 800  # What we aim for
 
 ALL_CATEGORIES = [
     "Agriculture & Farming", "Business & Finance", "Culture & Traditions",
@@ -279,31 +288,83 @@ def pick_topic_for_category(category: str, state: Dict) -> str:
 
 
 # ===========================================================================
+# Topic Relevance Check
+# ===========================================================================
+
+def is_content_relevant(topic: str, content: str) -> bool:
+    """
+    Check if the scraped content is actually about the topic.
+    Extracts significant words from the topic and checks if they
+    appear in the content. At least 2 topic words must match.
+    """
+    # Extract meaningful words from topic (3+ characters, not common words)
+    stop_words = {
+        "the", "and", "for", "with", "that", "this", "from", "are", "was",
+        "have", "has", "had", "not", "but", "its", "can", "all", "will",
+        "about", "which", "their", "what", "when", "where", "who", "how",
+        "across", "into", "over", "after", "before", "between", "under",
+        "east", "west", "north", "south", "africa", "african",
+        "in", "of", "to", "a", "an", "is", "it", "on", "by", "as", "at",
+        "be", "or", "we", "our", "these", "those", "they", "them",
+    }
+    topic_words = [
+        w.lower() for w in re.findall(r'[a-zA-Z]{3,}', topic)
+        if w.lower() not in stop_words
+    ]
+    if not topic_words:
+        return True  # Can't check, accept it
+
+    content_lower = content.lower()
+    matches = sum(1 for w in topic_words if w in content_lower)
+
+    # Need at least 2 topic words in the content, or 50% of topic words
+    threshold = max(2, len(topic_words) // 2)
+    return matches >= threshold
+
+
+# ===========================================================================
 # Web Sources
 # ===========================================================================
 
 def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
+    """
+    Search Wikipedia. Always the most relevant source.
+    Returns (content, source_url) or None.
+    """
     print(f"    [Wikipedia] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://en.wikipedia.org/w/api.php"
-        params = {"action": "query", "list": "search", "srsearch": topic, "format": "json", "srlimit": 1}
-        headers = {"User-Agent": "KnowledgePipeline/2.1"}
+        params = {
+            "action": "query", "list": "search", "srsearch": topic,
+            "format": "json", "srlimit": 3,
+        }
+        headers = {"User-Agent": "KnowledgePipeline/2.2"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         results = data.get("query", {}).get("search", [])
         if not results:
             return None
-        page_title = results[0]["title"]
-        extract_params = {"action": "query", "prop": "extracts", "exintro": True, "explaintext": True, "titles": page_title, "format": "json"}
-        response = requests.get(search_url, params=extract_params, headers=headers, timeout=REQUEST_TIMEOUT)
-        data = response.json()
-        pages = data.get("query", {}).get("pages", {})
-        for page_data in pages.values():
-            extract = page_data.get("extract", "")
-            if extract and len(extract) > 300:
-                url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
-                return extract[:3000], url
+
+        # Try up to 3 results until we get a long enough extract
+        for result in results[:3]:
+            page_title = result["title"]
+            extract_params = {
+                "action": "query", "prop": "extracts", "exintro": False,
+                "explaintext": True, "titles": page_title, "format": "json",
+            }
+            response = requests.get(search_url, params=extract_params, headers=headers, timeout=REQUEST_TIMEOUT)
+            data = response.json()
+            pages = data.get("query", {}).get("pages", {})
+            for page_data in pages.values():
+                extract = page_data.get("extract", "")
+                if extract and len(extract) >= MIN_SCRAPED_LENGTH:
+                    if is_content_relevant(topic, extract):
+                        url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
+                        print(f"    Got {len(extract)} chars — relevant")
+                        sys.stdout.flush()
+                        return extract[:5000], url
+
         return None
     except Exception as e:
         print(f"    Wikipedia error: {e}")
@@ -311,12 +372,31 @@ def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
+    """
+    Search Stack Exchange. Only use for technology/programming topics.
+    Returns (content, source_url) or None.
+    """
+    tech_keywords = [
+        "programming", "code", "software", "developer", "web", "app",
+        "database", "server", "API", "framework", "JavaScript", "Python",
+        "Java", "PHP", "Ruby", "HTML", "CSS", "SQL", "C++", "C#",
+        "security", "deployment", "testing", "debugging", "algorithm",
+        "mobile", "cloud", "devops", "frontend", "backend", "fullstack",
+        "react", "angular", "vue", "node", "docker", "kubernetes",
+        "linux", "git", "open source",
+    ]
+    if not any(kw.lower() in topic.lower() for kw in tech_keywords):
+        return None
+
     print(f"    [StackExchange] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://api.stackexchange.com/2.3/search/advanced"
-        params = {"order": "desc", "sort": "votes", "q": topic, "site": "stackoverflow", "pagesize": 1, "filter": "withbody"}
-        headers = {"User-Agent": "KnowledgePipeline/2.1"}
+        params = {
+            "order": "desc", "sort": "votes", "q": topic,
+            "site": "stackoverflow", "pagesize": 1, "filter": "withbody",
+        }
+        headers = {"User-Agent": "KnowledgePipeline/2.2"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -327,10 +407,12 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
         title = item.get("title", "")
         body = re.sub(r'<[^>]+>', ' ', item.get("body", ""))
         body = re.sub(r'\s+', ' ', body).strip()
-        combined = f"{title}. {body[:800]}"
-        if len(combined) > 300:
+        combined = f"{title}. {body[:1500]}"
+        if len(combined) >= MIN_SCRAPED_LENGTH and is_content_relevant(topic, combined):
             url = item.get("link", "")
-            return combined[:3000], url
+            print(f"    Got {len(combined)} chars — relevant")
+            sys.stdout.flush()
+            return combined[:5000], url
         return None
     except Exception as e:
         print(f"    StackExchange error: {e}")
@@ -338,12 +420,26 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
+    """
+    Search MDN Web Docs. Only use for web development topics.
+    Returns (content, source_url) or None.
+    """
+    web_keywords = [
+        "HTML", "CSS", "JavaScript", "DOM", "accessibility", "responsive",
+        "Flexbox", "Grid", "animation", "transition", "event", "fetch",
+        "API", "web", "browser", "frontend", "stylesheet", "selector",
+        "element", "attribute", "property", "method", "function",
+        "array", "object", "promise", "async", "component",
+    ]
+    if not any(kw.lower() in topic.lower() for kw in web_keywords):
+        return None
+
     print(f"    [MDN] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://developer.mozilla.org/api/v1/search"
         params = {"q": topic, "locale": "en-US"}
-        headers = {"User-Agent": "KnowledgePipeline/2.1"}
+        headers = {"User-Agent": "KnowledgePipeline/2.2"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -352,25 +448,47 @@ def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
             return None
         doc = documents[0]
         combined = f"{doc.get('title', '')}. {doc.get('summary', '')}"
-        if len(combined) > 300:
+        if len(combined) >= MIN_SCRAPED_LENGTH and is_content_relevant(topic, combined):
             url = f"https://developer.mozilla.org{doc.get('mdn_url', '')}"
-            return combined[:3000], url
+            print(f"    Got {len(combined)} chars — relevant")
+            sys.stdout.flush()
+            return combined[:5000], url
         return None
     except Exception as e:
         print(f"    MDN error: {e}")
         return None
 
 
-def fetch_content(topic: str, state: Dict) -> Optional[Tuple[str, str]]:
+def fetch_content(topic: str, category: str, state: Dict) -> Optional[Tuple[str, str]]:
+    """
+    Fetch content from the best available source.
+    Wikipedia first (always try). Then StackExchange (tech only).
+    Then MDN (web only). Skips previously scraped URLs.
+    """
     scraped_urls = get_scraped_urls(state)
-    sources = [search_wikipedia, search_stackexchange, search_mdn]
-    random.shuffle(sources)
-    for source_func in sources:
-        result = source_func(topic)
+
+    # Wikipedia is always the best source — try it first
+    result = search_wikipedia(topic)
+    if result:
+        content, url = result
+        if url not in scraped_urls:
+            return content, url
+
+    # For tech topics, try StackExchange
+    if category in ["Technology & Innovation", "Science & Innovation", "Education & Learning"]:
+        result = search_stackexchange(topic)
         if result:
             content, url = result
             if url not in scraped_urls:
                 return content, url
+
+    # For web-specific topics, try MDN
+    result = search_mdn(topic)
+    if result:
+        content, url = result
+        if url not in scraped_urls:
+            return content, url
+
     return None
 
 
@@ -379,6 +497,14 @@ def fetch_content(topic: str, state: Dict) -> Optional[Tuple[str, str]]:
 # ===========================================================================
 
 def rewrite_content(original: str, topic: str, category: str) -> str:
+    """
+    Rewrite scraped content in a conversational first-person voice.
+    Uses randomized personal starters and one of three rewrite styles.
+    Requires at least 500 chars of source material for quality output.
+    """
+    if len(original) < MIN_SCRAPED_LENGTH:
+        return ""
+
     personal_starters = [
         "In my community, we", "Growing up, I learned that",
         "My grandmother taught me that", "Many people in our region believe",
@@ -418,33 +544,37 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
 
     starter = random.choice(personal_starters)
     sentences = re.split(r'(?<=[.!?])\s+', original)
-    key_sentences = [s.strip() for s in sentences[:8] if 20 < len(s.strip()) < 500]
+    key_sentences = [s.strip() for s in sentences if 30 < len(s.strip()) < 500]
 
     if not key_sentences:
         return ""
+
+    # Use more sentences for longer output — aim for TARGET_REWRITTEN_LENGTH
+    max_sentences = min(len(key_sentences), 12)
 
     style = random.choice(["narrative", "instructional", "comparative"])
 
     if style == "narrative":
         rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
-        for sentence in key_sentences[1:5]:
+        for sentence in key_sentences[1:max_sentences]:
             rewritten += f"{sentence}\n\n"
     elif style == "instructional":
         rewritten = f"{starter}\n\n"
-        for i, sentence in enumerate(key_sentences[:5], 1):
+        for i, sentence in enumerate(key_sentences[:max_sentences], 1):
             rewritten += f"{i}. {sentence}\n\n"
     else:
         rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
+        midpoint = max_sentences // 2
         if len(key_sentences) >= 3:
             rewritten += f"On one hand, {key_sentences[1].lower()}\n\n"
-            rewritten += f"On the other hand, {key_sentences[2].lower()}\n\n"
-        for sentence in key_sentences[3:5]:
+            rewritten += f"On the other hand, {key_sentences[min(2, len(key_sentences)-1)].lower()}\n\n"
+        for sentence in key_sentences[3:max_sentences]:
             rewritten += f"{sentence}\n\n"
 
     rewritten += random.choice(conclusions)
 
-    if len(rewritten) < 200:
-        rewritten += "\n\nThis is knowledge that matters in daily life. I am sharing what I know so others can benefit."
+    if len(rewritten) < MIN_REWRITTEN_LENGTH:
+        rewritten += "\n\nThis is knowledge that matters in daily life. I am sharing what I know so others can benefit from it. What I have learned comes from real experience, not from books or the internet."
 
     return rewritten[:50000]
 
@@ -454,6 +584,7 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
+    """Submit to training form. Returns (success, submission_id)."""
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -508,11 +639,13 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 # ===========================================================================
 
 def run_scraper(max_submissions: int = 10):
+    """Main scraper loop with quality gates and state tracking."""
     print("=" * 60)
-    print(f"Web Scraper v2.1 — {SCRAPER_NAME}")
+    print(f"Web Scraper v2.2 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
+    print(f"Min source: {MIN_SCRAPED_LENGTH} chars | Min rewrite: {MIN_REWRITTEN_LENGTH} chars")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
@@ -524,7 +657,10 @@ def run_scraper(max_submissions: int = 10):
     skipped = 0
     failed = 0
 
-    for i in range(max_submissions * 3):
+    # Try up to 4x max_submissions to account for skips
+    max_attempts = max_submissions * 4
+
+    for i in range(max_attempts):
         if submission_count >= max_submissions:
             break
 
@@ -537,19 +673,24 @@ def run_scraper(max_submissions: int = 10):
         print(f"  Category: {category}")
         sys.stdout.flush()
 
-        result = fetch_content(topic, state)
+        result = fetch_content(topic, category, state)
         if not result:
             skipped += 1
-            print(f"  No content found, skipping")
+            print(f"  No relevant content found, skipping")
             continue
 
         original_text, source_url = result
-        print(f"  Source: {source_url[:80]}...")
+
+        if len(original_text) < MIN_SCRAPED_LENGTH:
+            skipped += 1
+            print(f"  Content too short ({len(original_text)} chars < {MIN_SCRAPED_LENGTH}), skipping")
+            continue
 
         rewritten = rewrite_content(original_text, topic, category)
-        if len(rewritten) < 200:
+
+        if len(rewritten) < MIN_REWRITTEN_LENGTH:
             skipped += 1
-            print(f"  Rewrite too short ({len(rewritten)} chars), skipping")
+            print(f"  Rewrite too short ({len(rewritten)} chars < {MIN_REWRITTEN_LENGTH}), skipping")
             continue
 
         print(f"  Content: {len(rewritten)} chars")
