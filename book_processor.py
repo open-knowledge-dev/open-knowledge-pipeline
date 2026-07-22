@@ -5,12 +5,14 @@ Extracts topics from language learning PDFs and generates
 original knowledge entries using AI — zero copyright risk.
 
 How it works:
-1. You upload a PDF + topic guide to books/
-2. Processor extracts topics from the guide (or AI scans the PDF)
-3. For each topic, AI generates a 670+ word original article
-4. AI NEVER copies the book — it generates from its own knowledge
-5. Progress is tracked in admin/book-processor-state.json
-6. Resumable — if it stops, restart picks up where it left off
+1. You upload a PDF to books/
+2. Run the workflow with language name/code/region
+3. AI auto-extracts topics (no guide file needed)
+4. For each topic, AI generates a 670+ word original article
+5. AI NEVER copies the book — it generates from its own knowledge
+6. All knowledge goes to the PRIVATE knowledge repo
+7. Progress is tracked in admin/book-processor-state.json (private repo)
+8. Resumable — if it stops, restart picks up where it left off
 
 Supports: All major languages (Twi, Ga, Ewe, Hausa, Yoruba, Swahili, etc.)
 """
@@ -48,10 +50,7 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 STATE_FILE_PATH = "admin/book-processor-state.json"
 BOOKS_DIR = "books"
 
-# Quality threshold
-MIN_CONTENT_LENGTH = 500  # Minimum characters before submission
-
-# Maximum topics to process in one run (6-hour GitHub Actions limit)
+MIN_CONTENT_LENGTH = 500
 MAX_TOPICS_PER_RUN = 60
 
 
@@ -215,7 +214,7 @@ def strip_markdown(text: str) -> str:
 
 
 # ===========================================================================
-# State File Operations
+# State File Operations (Private Knowledge Repo)
 # ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
@@ -226,7 +225,7 @@ def _github_headers() -> Dict[str, str]:
 
 
 def load_state() -> Dict:
-    """Load the book processor state from the knowledge repo."""
+    """Load the book processor state from the PRIVATE knowledge repo."""
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
@@ -243,7 +242,7 @@ def load_state() -> Dict:
 
 
 def save_state(state: Dict) -> bool:
-    """Save the book processor state to the knowledge repo."""
+    """Save the book processor state to the PRIVATE knowledge repo."""
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
     content_json = json.dumps(state, indent=2, default=str)
@@ -271,31 +270,29 @@ def save_state(state: Dict) -> bool:
 
 
 # ===========================================================================
-# Topic Guide Loading
+# Topic Guide Loading (Optional — from books/ folder)
 # ===========================================================================
 
 def load_topic_guide(guide_file: str) -> List[Dict[str, str]]:
     """
     Load topics from a topic guide file in the books/ folder.
-    
+    Returns empty list if file doesn't exist — AI will auto-extract instead.
+
     Format: One topic per line. Lines starting with # are ignored.
     Each line can be: "Topic Name" or "Topic Name | Category"
-    
-    Returns list of {"topic": str, "category": str}
     """
     topics = []
     guide_path = os.path.join(BOOKS_DIR, guide_file)
-    
-    if not os.path.exists(guide_path):
-        print(f"  Topic guide not found: {guide_path}")
+
+    if not guide_file or not os.path.exists(guide_path):
         return topics
-    
+
     with open(guide_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            
+
             if '|' in line:
                 parts = line.split('|')
                 topic = parts[0].strip()
@@ -303,10 +300,91 @@ def load_topic_guide(guide_file: str) -> List[Dict[str, str]]:
             else:
                 topic = line
                 category = "Language & Proverbs"
-            
+
             if topic:
                 topics.append({"topic": topic, "category": category})
-    
+
+    return topics
+
+
+# ===========================================================================
+# Topic Extraction from AI (No Guide File Needed)
+# ===========================================================================
+
+def extract_topics_with_ai(language_name: str) -> List[Dict[str, str]]:
+    """
+    Ask AI to generate a comprehensive topic list for a language learning book.
+    Used when no topic guide file exists.
+    All topics go to the PRIVATE knowledge repo.
+    """
+    print(f"\n  Extracting topics for {language_name} via AI...")
+    sys.stdout.flush()
+
+    system_prompt = (
+        "You are a curriculum designer for language education. "
+        "Given a language name, list every distinct topic that would be covered "
+        "in a comprehensive beginner-to-intermediate language learning book. "
+        "Include: alphabet, pronunciation, vowels, consonants, tones, greetings, "
+        "numbers, common phrases, verb conjugation, sentence structure, "
+        "question formation, negation, past/present/future tense, "
+        "cultural context, proverbs, common expressions, formal vs informal speech. "
+        "Return one topic per line. No numbering, no bullet points, no markdown. "
+        "Each line should be a clear, specific topic name."
+    )
+
+    user_prompt = f"List all topics for a comprehensive {language_name} language learning book."
+
+    topics_text = ""
+    if GROQ_API_KEY:
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        try:
+            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                topics_text = response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"    Topic extraction failed: {e}")
+
+    if not topics_text and MISTRAL_API_KEY:
+        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "mistral-small-latest",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        try:
+            response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                topics_text = response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"    Topic extraction failed: {e}")
+
+    if not topics_text:
+        print("    Could not extract topics.")
+        return []
+
+    topics = []
+    for line in topics_text.strip().split('\n'):
+        line = line.strip()
+        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
+        line = re.sub(r'^[\-\*\•]\s*', '', line)
+        line = line.strip()
+        if line and len(line) > 5:
+            topics.append({"topic": line, "category": "Language & Proverbs"})
+
+    print(f"    Extracted {len(topics)} topics")
     return topics
 
 
@@ -322,10 +400,8 @@ def generate_with_groq(topic: str, style: Dict, language_name: str) -> str:
     sys.stdout.flush()
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     user_prompt = style["user_template"].replace("{topic}", topic)
-    
-    # Add language context
     system_prompt = style["system"].replace("this language", language_name)
-    
+
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [
@@ -359,7 +435,7 @@ def generate_with_mistral(topic: str, style: Dict, language_name: str) -> str:
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     user_prompt = style["user_template"].replace("{topic}", topic)
     system_prompt = style["system"].replace("this language", language_name)
-    
+
     payload = {
         "model": "mistral-small-latest",
         "messages": [
@@ -402,11 +478,14 @@ def generate_content(topic: str, language_name: str) -> str:
 
 
 # ===========================================================================
-# Submission
+# Submission (Sends to PRIVATE Knowledge Repo via Training Form)
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str, language: str, region: str) -> Tuple[bool, str]:
-    """Submit knowledge to the training form. Returns (success, submission_id)."""
+    """
+    Submit knowledge to the training form.
+    The training form writes to the PRIVATE knowledge repo.
+    """
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -458,96 +537,16 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str, reg
 
 
 # ===========================================================================
-# Topic Extraction from PDF (using AI)
-# ===========================================================================
-
-def extract_topics_with_ai(language_name: str, guide_file: str) -> List[Dict[str, str]]:
-    """
-    If no topic guide exists, ask AI to generate a topic list
-    based on what a language learning book typically covers.
-    """
-    print(f"\n  Extracting topics for {language_name}...")
-    sys.stdout.flush()
-    
-    system_prompt = (
-        "You are a curriculum designer for language education. "
-        "Given a language name, list every distinct topic that would be covered "
-        "in a comprehensive beginner-to-intermediate language learning book. "
-        "Include: alphabet, pronunciation, vowels, consonants, tones, greetings, "
-        "numbers, common phrases, verb conjugation, sentence structure, "
-        "question formation, negation, past/present/future tense, "
-        "cultural context, proverbs, common expressions, formal vs informal speech. "
-        "Return one topic per line. No numbering, no bullet points, no markdown. "
-        "Each line should be a clear, specific topic name."
-    )
-    
-    user_prompt = f"List all topics for a comprehensive {language_name} language learning book."
-    
-    topics_text = ""
-    if GROQ_API_KEY:
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1000,
-        }
-        try:
-            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"    Topic extraction failed: {e}")
-    
-    if not topics_text and MISTRAL_API_KEY:
-        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1000,
-        }
-        try:
-            response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"    Topic extraction failed: {e}")
-    
-    if not topics_text:
-        print("    Could not extract topics.")
-        return []
-    
-    topics = []
-    for line in topics_text.strip().split('\n'):
-        line = line.strip()
-        # Remove numbering, bullet points, markdown
-        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
-        line = re.sub(r'^[\-\*\•]\s*', '', line)
-        line = line.strip()
-        if line and len(line) > 5:
-            topics.append({"topic": line, "category": "Language & Proverbs"})
-    
-    print(f"    Extracted {len(topics)} topics")
-    return topics
-
-
-# ===========================================================================
 # Main
 # ===========================================================================
 
 def run_book_processor(guide_file: str, language_name: str, language_code: str, region: str):
     """
     Process a language learning book into knowledge entries.
-    
+    All output goes to the PRIVATE knowledge repo.
+
     Args:
-        guide_file: Name of the topic guide file in books/ folder (e.g., "twi-guide.txt")
+        guide_file: Optional topic guide filename in books/ folder ("" for AI auto-extraction)
         language_name: Full language name (e.g., "Twi")
         language_code: Language code for submission (e.g., "Twi")
         region: Region for submission (e.g., "Ghana")
@@ -555,33 +554,34 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
     print("=" * 60)
     print(f"Book Processor v1.0 — {language_name}")
     print("=" * 60)
-    print(f"Guide file: {guide_file}")
+    print(f"Guide file: {guide_file if guide_file else 'AI auto-extraction'}")
     print(f"Language: {language_name} ({language_code})")
     print(f"Region: {region}")
     print(f"Delay: {SUBMISSION_DELAY}s between submissions")
+    print(f"Output: PRIVATE knowledge repo ({KNOWLEDGE_REPO})")
     print("-" * 60)
     sys.stdout.flush()
 
-    # Load topics
-    topics = load_topic_guide(guide_file)
-    
+    # Load topics — from guide file or AI extraction
+    topics = load_topic_guide(guide_file) if guide_file else []
+
     if not topics:
         print("  No topic guide found. Extracting topics via AI...")
-        topics = extract_topics_with_ai(language_name, guide_file)
-    
+        topics = extract_topics_with_ai(language_name)
+
     if not topics:
-        print("ERROR: No topics to process. Create a topic guide file or enable AI extraction.")
+        print("ERROR: No topics to process.")
         return
 
     print(f"  Total topics: {len(topics)}")
 
-    # Load state
+    # Load state from PRIVATE knowledge repo
     state = load_state()
-    book_key = guide_file.replace('.txt', '').replace('.md', '')
-    
+    book_key = (guide_file if guide_file else language_code) + "-" + language_code
+
     if book_key not in state:
         state[book_key] = {
-            "guide_file": guide_file,
+            "guide_file": guide_file if guide_file else "ai-extracted",
             "language_name": language_name,
             "language_code": language_code,
             "region": region,
@@ -592,10 +592,10 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
             "started_at": datetime.now(timezone.utc).isoformat(),
             "last_run": "",
         }
-    
+
     book_state = state[book_key]
     start_index = book_state.get("current_index", 0)
-    
+
     print(f"  Resuming from topic {start_index + 1} of {len(topics)}")
     print(f"  Completed so far: {len(book_state.get('completed_topics', []))}")
     print("-" * 60)
@@ -612,14 +612,14 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
         topic_info = topics[i]
         topic = topic_info["topic"]
         category = topic_info.get("category", "Language & Proverbs")
-        
+
         print(f"\n[{i + 1}/{len(topics)}] Topic: {topic}")
         print(f"  Category: {category}")
         sys.stdout.flush()
 
         # Generate content
         knowledge = generate_content(topic, language_name)
-        
+
         if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed_count += 1
             book_state["failed_topics"].append({"index": i, "topic": topic, "reason": "content_too_short"})
@@ -647,7 +647,7 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
         print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
         sys.stdout.flush()
 
-        # Submit
+        # Submit to training form → goes to PRIVATE knowledge repo
         success, submission_id = submit_to_form(
             topic, category, knowledge, language_code, region
         )
@@ -658,13 +658,13 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
                 "index": i, "topic": topic, "submission_id": submission_id,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             })
-            print(f"  ✅ Submitted: {submission_id}")
+            print(f"  Submitted to private repo: {submission_id}")
         else:
             failed_count += 1
             book_state["failed_topics"].append({"index": i, "topic": topic, "reason": "submission_failed"})
-            print(f"  ❌ Submission failed")
+            print(f"  Submission failed")
 
-        # Update state
+        # Update state in PRIVATE knowledge repo
         book_state["current_index"] = i + 1
         book_state["last_run"] = datetime.now(timezone.utc).isoformat()
         state[book_key] = book_state
@@ -682,10 +682,10 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
         book_state["completed_at"] = datetime.now(timezone.utc).isoformat()
         state[book_key] = book_state
         save_state(state)
-        print(f"\n🎉 BOOK COMPLETE: {language_name}")
-        print(f"   Total entries: {len(book_state['completed_topics'])}")
+        print(f"\nBOOK COMPLETE: {language_name}")
+        print(f"   Total entries in private repo: {len(book_state['completed_topics'])}")
     else:
-        print(f"\n⏸️  PAUSED at topic {book_state['current_index'] + 1} of {len(topics)}")
+        print(f"\nPAUSED at topic {book_state['current_index'] + 1} of {len(topics)}")
         print(f"   Will resume on next run.")
 
     print("=" * 60)
@@ -696,15 +696,15 @@ def run_book_processor(guide_file: str, language_name: str, language_code: str, 
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Process language learning books into knowledge entries.")
-    parser.add_argument("--guide", required=True, help="Topic guide filename in books/ folder (e.g., twi-guide.txt)")
+    parser.add_argument("--guide", default="", help="Topic guide filename (optional — AI auto-extracts if blank)")
     parser.add_argument("--language", required=True, help="Language name (e.g., 'Twi')")
     parser.add_argument("--code", required=True, help="Language code (e.g., 'Twi')")
     parser.add_argument("--region", default="Ghana", help="Region (e.g., 'Ghana')")
-    
+
     args = parser.parse_args()
-    
+
     run_book_processor(
         guide_file=args.guide,
         language_name=args.language,
