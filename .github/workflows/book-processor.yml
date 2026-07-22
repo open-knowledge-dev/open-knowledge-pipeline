@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       guide_file:
-        description: 'Topic guide filename in books/ folder (e.g., twi-guide.txt)'
-        required: true
+        description: 'Topic guide filename (optional — leave blank for AI auto-extraction)'
+        required: false
         type: string
+        default: ''
       language_name:
         description: 'Language name (e.g., Twi)'
         required: true
@@ -48,17 +49,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
         run: |
-          if [ -n "${{ github.event.inputs.guide_file }}" ]; then
+          if [ -n "${{ github.event.inputs.language_name }}" ]; then
             python book_processor.py \
               --guide "${{ github.event.inputs.guide_file }}" \
               --language "${{ github.event.inputs.language_name }}" \
               --code "${{ github.event.inputs.language_code }}" \
               --region "${{ github.event.inputs.region }}"
           else
-            echo "No manual trigger input. Checking for in-progress books..."
-            # The state file will resume any book that's not complete
+            echo "Checking for in-progress books to resume..."
             python -c "
-import json, os, base64, requests
+import json, os, base64, requests, subprocess, sys
 state_path = 'admin/book-processor-state.json'
 gh_token = os.getenv('GH_TOKEN')
 repo = os.getenv('KNOWLEDGE_REPO')
@@ -76,10 +76,9 @@ if gh_token and repo:
                     total = book_state.get('total_topics', 0)
                     if current < total:
                         print(f'Resuming: {book_key} (topic {current+1} of {total})')
-                        import subprocess, sys
                         subprocess.run([
                             sys.executable, 'book_processor.py',
-                            '--guide', book_state.get('guide_file', f'{book_key}.txt'),
+                            '--guide', book_state.get('guide_file', ''),
                             '--language', book_state.get('language_name', book_key),
                             '--code', book_state.get('language_code', book_key),
                             '--region', book_state.get('region', 'Ghana'),
