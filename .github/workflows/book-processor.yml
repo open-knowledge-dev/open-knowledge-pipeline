@@ -3,6 +3,10 @@ name: Book Processor
 on:
   workflow_dispatch:
     inputs:
+      pdf_file:
+        description: 'PDF filename in books/ folder (e.g., GH_Twi_Language_Lessons.pdf)'
+        required: true
+        type: string
       language_name:
         description: 'Language name (e.g., Twi)'
         required: true
@@ -16,6 +20,8 @@ on:
         required: false
         type: string
         default: 'Ghana'
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
   process:
@@ -31,7 +37,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests pdfplumber
 
       - name: Run book processor
         env:
@@ -42,8 +48,40 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
         run: |
-          python book_processor.py \
-            --guide "" \
-            --language "${{ github.event.inputs.language_name }}" \
-            --code "${{ github.event.inputs.language_code }}" \
-            --region "${{ github.event.inputs.region }}"
+          if [ -n "${{ github.event.inputs.pdf_file }}" ]; then
+            python book_processor.py \
+              --pdf "${{ github.event.inputs.pdf_file }}" \
+              --language "${{ github.event.inputs.language_name }}" \
+              --code "${{ github.event.inputs.language_code }}" \
+              --region "${{ github.event.inputs.region }}"
+          else
+            echo "Auto-resume: Checking for in-progress books..."
+            python -c "
+import json, os, base64, requests, subprocess, sys
+state_path = 'admin/book-processor-state.json'
+gh_token = os.getenv('GH_TOKEN')
+repo = os.getenv('KNOWLEDGE_REPO')
+if gh_token and repo:
+    url = f'https://api.github.com/repos/{repo}/contents/{state_path}'
+    headers = {'Authorization': f'token {gh_token}', 'Accept': 'application/vnd.github.v3+json'}
+    r = requests.get(url, headers=headers, timeout=15)
+    if r.status_code == 200:
+        content = r.json().get('content', '')
+        if content:
+            state = json.loads(base64.b64decode(content).decode('utf-8'))
+            for book_key, book_state in state.items():
+                if isinstance(book_state, dict) and 'sections' in book_state:
+                    current = book_state.get('current_index', 0)
+                    total = book_state.get('total_sections', 0)
+                    if current < total:
+                        print(f'Resuming: {book_key} (section {current+1} of {total})')
+                        subprocess.run([
+                            sys.executable, 'book_processor.py',
+                            '--pdf', book_state.get('pdf_file', f'{book_key}.pdf'),
+                            '--language', book_state.get('language_name', book_key),
+                            '--code', book_state.get('language_code', book_key),
+                            '--region', book_state.get('region', 'Ghana'),
+                        ])
+                        break
+            "
+          fi
