@@ -1,20 +1,22 @@
 """
-Book Knowledge Processor — v1.0
+Book Knowledge Processor — v2.0
 ================================
-Extracts topics from language learning PDFs and generates
-original knowledge entries using AI — zero copyright risk.
+Extracts sections from language learning PDFs and generates
+original English lessons using AI — zero copyright risk.
 
 How it works:
-1. You upload a PDF to books/
+1. You upload a PDF to books/ (local only, never committed)
 2. Run the workflow with language name/code/region
-3. AI auto-extracts topics (no guide file needed)
-4. For each topic, AI generates a 670+ word original article
-5. AI NEVER copies the book — it generates from its own knowledge
-6. All knowledge goes to the PRIVATE knowledge repo
-7. Progress is tracked in admin/book-processor-state.json (private repo)
-8. Resumable — if it stops, restart picks up where it left off
+3. PDF text is extracted section by section
+4. AI receives ONLY the target-language words + their English meanings
+5. AI writes a 670+ word lesson explaining those facts in English
+6. AI NEVER invents new target-language words
+7. AI NEVER reproduces the source text — it teaches in its own words
+8. All knowledge goes to the PRIVATE knowledge repo
+9. Progress tracked in admin/book-processor-state.json (private repo)
+10. Resumable — picks up where it left off
 
-Supports: All major languages (Twi, Ga, Ewe, Hausa, Yoruba, Swahili, etc.)
+Supports: All languages with a PDF reference
 """
 
 import os
@@ -51,149 +53,127 @@ STATE_FILE_PATH = "admin/book-processor-state.json"
 BOOKS_DIR = "books"
 
 MIN_CONTENT_LENGTH = 500
-MAX_TOPICS_PER_RUN = 60
+MAX_SECTIONS_PER_RUN = 40
 
 
 # ===========================================================================
-# Prompt Styles for Language Content
+# PDF Text Extraction
 # ===========================================================================
 
-PROMPT_STYLES = [
-    {
-        "name": "explain-simply",
-        "system": (
-            "You are a patient language teacher who grew up speaking this language natively. "
-            "Explain concepts in simple terms with real examples from daily life. "
-            "Write in first person as if sharing knowledge passed down through generations. "
-            "Be warm, encouraging, and practical. Never mention AI or language models. "
-            "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
-            "Write in plain text only."
-        ),
-        "user_template": (
-            'Explain "{topic}" in simple terms for someone learning this language. '
-            "Use real examples from everyday conversation. Include pronunciation tips "
-            "and common mistakes to avoid. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
-        ),
-    },
-    {
-        "name": "personal-story",
-        "system": (
-            "You are a native speaker sharing the wisdom of your mother tongue. "
-            "Write in first person with warmth and authority. Share how you learned "
-            "these language concepts as a child and how you teach them to others. "
-            "Your knowledge comes from living the language, not books. "
-            "Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Share your personal knowledge about "{topic}" as a native speaker. '
-            "How did you learn this? How do you teach it to others? "
-            "What examples from daily life make it clear? "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "compare-contrast",
-        "system": (
-            "You are a linguist who understands how languages differ and connect. "
-            "Compare this language with English to help learners understand. "
-            "Write in first person. Be fair and balanced. "
-            "Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Explain "{topic}" by comparing how it works in this language versus English. '
-            "What is similar? What is completely different? Why? "
-            "Give specific examples in both languages. "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "step-by-step",
-        "system": (
-            "You are a skilled language teacher who has taught hundreds of students. "
-            "Give clear, numbered steps for mastering this language concept. "
-            "Include practice exercises and tips from real teaching experience. "
-            "Write in first person. Be precise and practical. "
-            "Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Provide a step-by-step guide for mastering "{topic}". '
-            "Include: what to learn first, practice exercises, how long it typically takes, "
-            "and common mistakes at each stage. "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "practical-guide",
-        "system": (
-            "You are a native speaker who uses this language every day. "
-            "Give practical, actionable guidance that learners can use immediately. "
-            "Include real phrases, cultural context, and when to use formal vs informal forms. "
-            "Write in first person from real experience. "
-            "Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Provide a practical guide for "{topic}" that learners can use right away. '
-            "Include: useful phrases, cultural context, when to use different forms, "
-            "and tips that only a native speaker would know. "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "common-mistakes",
-        "system": (
-            "You are a language teacher who has corrected thousands of student errors. "
-            "Share the most common mistakes learners make and how to fix them. "
-            "Be specific — give the wrong way and the right way for each. "
-            "Write in first person. Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'What are the most common mistakes English speakers make with "{topic}"? '
-            "For each mistake: show the wrong way, the right way, and explain why. "
-            "Give memory tricks to avoid each mistake. "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "regional-variations",
-        "system": (
-            "You are a well-traveled native speaker who knows how your language "
-            "varies across regions, towns, and even families. "
-            "Describe the variations and why they exist. "
-            "Write in first person with rich observation. "
-            "Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Describe how "{topic}" varies across different regions and communities. '
-            "What are the local differences? Why do they exist? "
-            "Which version should a learner use? "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-    {
-        "name": "cultural-context",
-        "system": (
-            "You are a cultural expert who understands that language cannot be "
-            "separated from the people who speak it. "
-            "Explain the cultural meaning behind words, phrases, and language customs. "
-            "Share the stories and traditions that shaped the language. "
-            "Write in first person. Never mention AI or language models. "
-            "Do NOT use markdown formatting. Write in plain text only."
-        ),
-        "user_template": (
-            'Explain the cultural context and meaning behind "{topic}". '
-            "What traditions, stories, or values shaped this aspect of the language? "
-            "Why is it important to understand the culture to use the language correctly? "
-            "Write at least 670 words. Use plain text only."
-        ),
-    },
-]
+def extract_pdf_text(pdf_path: str) -> str:
+    """
+    Extract all text from a PDF file using pdfplumber.
+    Returns the full text as a single string.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        print("  Installing pdfplumber...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pdfplumber"])
+        import pdfplumber
+
+    print(f"  Extracting text from PDF: {pdf_path}")
+    sys.stdout.flush()
+
+    full_text = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            total_pages = len(pdf.pages)
+            print(f"  Total pages: {total_pages}")
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if text:
+                    full_text.append(text)
+                if (i + 1) % 10 == 0:
+                    print(f"  Extracted page {i + 1}/{total_pages}")
+                    sys.stdout.flush()
+    except Exception as e:
+        print(f"  PDF extraction error: {e}")
+        return ""
+
+    combined = "\n\n".join(full_text)
+    print(f"  Total extracted: {len(combined)} characters")
+    return combined
+
+
+def split_into_sections(text: str, max_chars: int = 2000) -> List[str]:
+    """
+    Split extracted text into manageable sections.
+    Tries to split on paragraph breaks and section headers.
+    """
+    # Split on double newlines first (paragraphs)
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    sections = []
+    current_section = ""
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # If adding this paragraph exceeds max, save current and start new
+        if len(current_section) + len(para) > max_chars and current_section:
+            sections.append(current_section.strip())
+            current_section = para
+        else:
+            if current_section:
+                current_section += "\n\n" + para
+            else:
+                current_section = para
+    
+    if current_section.strip():
+        sections.append(current_section.strip())
+    
+    # Filter out very short sections
+    sections = [s for s in sections if len(s) > 100]
+    
+    print(f"  Split into {len(sections)} sections")
+    return sections
+
+
+# ===========================================================================
+# Prompt Style for Language Lessons
+# ===========================================================================
+
+def build_lesson_prompt(facts_text: str, language_name: str) -> Tuple[str, str]:
+    """
+    Build the system and user prompts for generating a language lesson.
+    The AI MUST use the exact target-language words provided.
+    The AI MUST NOT invent new target-language words.
+    """
+    system_prompt = (
+        f"You are a native {language_name} speaker and a patient language teacher. "
+        "Your job is to create an English-language lesson that teaches "
+        f"{language_name} words and concepts to beginners.\n\n"
+        "CRITICAL RULES:\n"
+        f"1. Use ONLY the exact {language_name} words, spellings, and facts provided below.\n"
+        f"2. Do NOT add, change, or invent any {language_name} words.\n"
+        f"3. If a {language_name} word is spelled a certain way below, use that exact spelling.\n"
+        "4. Your job is to EXPLAIN these facts in English — add examples, "
+        "pronunciation tips, memory tricks, and cultural context.\n"
+        "5. Write in first person as if you grew up speaking this language.\n"
+        "6. Write at least 670 words.\n"
+        "7. Never mention AI, language models, or that you were given these facts.\n"
+        "8. Do NOT use markdown formatting. Write in plain text only.\n"
+        "9. Write as if you are teaching a friend your language."
+    )
+
+    user_prompt = (
+        f"Here are {language_name} language facts from a reference book:\n\n"
+        f"{facts_text}\n\n"
+        f"Using ONLY these exact {language_name} words and facts, "
+        "write a complete 670+ word lesson in English. "
+        "Explain what each word means, how to pronounce it, "
+        "when to use it, and any cultural context. "
+        "Add memory tricks and examples from daily life. "
+        "Write in first person as a native speaker. "
+        "Do NOT add any target-language words beyond what is provided above. "
+        "Write in plain text only — no markdown formatting."
+    )
+
+    return system_prompt, user_prompt
 
 
 # ===========================================================================
@@ -270,145 +250,23 @@ def save_state(state: Dict) -> bool:
 
 
 # ===========================================================================
-# Topic Guide Loading (Optional — from books/ folder)
-# ===========================================================================
-
-def load_topic_guide(guide_file: str) -> List[Dict[str, str]]:
-    """
-    Load topics from a topic guide file in the books/ folder.
-    Returns empty list if file doesn't exist — AI will auto-extract instead.
-
-    Format: One topic per line. Lines starting with # are ignored.
-    Each line can be: "Topic Name" or "Topic Name | Category"
-    """
-    topics = []
-    guide_path = os.path.join(BOOKS_DIR, guide_file)
-
-    if not guide_file or not os.path.exists(guide_path):
-        return topics
-
-    with open(guide_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-
-            if '|' in line:
-                parts = line.split('|')
-                topic = parts[0].strip()
-                category = parts[1].strip() if len(parts) > 1 else "Language & Proverbs"
-            else:
-                topic = line
-                category = "Language & Proverbs"
-
-            if topic:
-                topics.append({"topic": topic, "category": category})
-
-    return topics
-
-
-# ===========================================================================
-# Topic Extraction from AI (No Guide File Needed)
-# ===========================================================================
-
-def extract_topics_with_ai(language_name: str) -> List[Dict[str, str]]:
-    """
-    Ask AI to generate a comprehensive topic list for a language learning book.
-    Used when no topic guide file exists.
-    All topics go to the PRIVATE knowledge repo.
-    """
-    print(f"\n  Extracting topics for {language_name} via AI...")
-    sys.stdout.flush()
-
-    system_prompt = (
-        "You are a curriculum designer for language education. "
-        "Given a language name, list every distinct topic that would be covered "
-        "in a comprehensive beginner-to-intermediate language learning book. "
-        "Include: alphabet, pronunciation, vowels, consonants, tones, greetings, "
-        "numbers, common phrases, verb conjugation, sentence structure, "
-        "question formation, negation, past/present/future tense, "
-        "cultural context, proverbs, common expressions, formal vs informal speech. "
-        "Return one topic per line. No numbering, no bullet points, no markdown. "
-        "Each line should be a clear, specific topic name."
-    )
-
-    user_prompt = f"List all topics for a comprehensive {language_name} language learning book."
-
-    topics_text = ""
-    if GROQ_API_KEY:
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1000,
-        }
-        try:
-            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"    Topic extraction failed: {e}")
-
-    if not topics_text and MISTRAL_API_KEY:
-        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1000,
-        }
-        try:
-            response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"    Topic extraction failed: {e}")
-
-    if not topics_text:
-        print("    Could not extract topics.")
-        return []
-
-    topics = []
-    for line in topics_text.strip().split('\n'):
-        line = line.strip()
-        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
-        line = re.sub(r'^[\-\*\•]\s*', '', line)
-        line = line.strip()
-        if line and len(line) > 5:
-            topics.append({"topic": line, "category": "Language & Proverbs"})
-
-    print(f"    Extracted {len(topics)} topics")
-    return topics
-
-
-# ===========================================================================
 # AI Content Generation
 # ===========================================================================
 
-def generate_with_groq(topic: str, style: Dict, language_name: str) -> str:
+def generate_with_groq(system_prompt: str, user_prompt: str) -> str:
     """Generate content using Groq API."""
     if not GROQ_API_KEY:
         return ""
-    print(f"    [Groq] Style: {style['name']}")
+    print(f"    [Groq] Generating lesson...")
     sys.stdout.flush()
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic)
-    system_prompt = style["system"].replace("this language", language_name)
-
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": random.uniform(0.7, 0.95),
+        "temperature": 0.75,
         "max_tokens": 2000,
     }
     try:
@@ -426,23 +284,20 @@ def generate_with_groq(topic: str, style: Dict, language_name: str) -> str:
         return ""
 
 
-def generate_with_mistral(topic: str, style: Dict, language_name: str) -> str:
+def generate_with_mistral(system_prompt: str, user_prompt: str) -> str:
     """Generate content using Mistral API (fallback)."""
     if not MISTRAL_API_KEY:
         return ""
-    print(f"    [Mistral] Style: {style['name']}")
+    print(f"    [Mistral] Generating lesson...")
     sys.stdout.flush()
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic)
-    system_prompt = style["system"].replace("this language", language_name)
-
     payload = {
         "model": "mistral-small-latest",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": random.uniform(0.7, 0.95),
+        "temperature": 0.75,
         "max_tokens": 2000,
     }
     try:
@@ -460,17 +315,17 @@ def generate_with_mistral(topic: str, style: Dict, language_name: str) -> str:
         return ""
 
 
-def generate_content(topic: str, language_name: str) -> str:
-    """Generate content using available APIs with a random prompt style."""
-    style = random.choice(PROMPT_STYLES)
+def generate_lesson(facts_text: str, language_name: str) -> str:
+    """Generate a language lesson from extracted facts."""
+    system_prompt, user_prompt = build_lesson_prompt(facts_text, language_name)
 
     if GROQ_API_KEY:
-        content = generate_with_groq(topic, style, language_name)
+        content = generate_with_groq(system_prompt, user_prompt)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
     if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, style, language_name)
+        content = generate_with_mistral(system_prompt, user_prompt)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
@@ -478,14 +333,11 @@ def generate_content(topic: str, language_name: str) -> str:
 
 
 # ===========================================================================
-# Submission (Sends to PRIVATE Knowledge Repo via Training Form)
+# Submission (Sends to PRIVATE Knowledge Repo)
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str, language: str, region: str) -> Tuple[bool, str]:
-    """
-    Submit knowledge to the training form.
-    The training form writes to the PRIVATE knowledge repo.
-    """
+    """Submit knowledge to the training form. Goes to PRIVATE knowledge repo."""
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -537,168 +389,207 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str, reg
 
 
 # ===========================================================================
+# Topic Extraction from Section Text
+# ===========================================================================
+
+def extract_topic_from_section(section_text: str, language_name: str) -> str:
+    """
+    Extract a topic name from a section of text.
+    Uses first heading or first meaningful line.
+    """
+    lines = section_text.strip().split('\n')
+    for line in lines[:5]:
+        line = line.strip()
+        # Skip very short lines and obvious non-headers
+        if 5 < len(line) < 120:
+            # Clean up the topic
+            topic = re.sub(r'^[\d]+[\.\)]\s*', '', line)
+            topic = topic.strip()
+            if topic:
+                return f"{language_name}: {topic}"
+    
+    # Fallback: use first 80 chars
+    first_line = lines[0].strip()[:80] if lines else "Language lesson"
+    return f"{language_name}: {first_line}"
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
-def run_book_processor(guide_file: str, language_name: str, language_code: str, region: str):
+def run_book_processor(pdf_file: str, language_name: str, language_code: str, region: str):
     """
-    Process a language learning book into knowledge entries.
+    Process a language learning PDF into knowledge entries.
     All output goes to the PRIVATE knowledge repo.
 
     Args:
-        guide_file: Optional topic guide filename in books/ folder ("" for AI auto-extraction)
+        pdf_file: PDF filename in books/ folder (e.g., "GH_Twi_Language_Lessons.pdf")
         language_name: Full language name (e.g., "Twi")
         language_code: Language code for submission (e.g., "Twi")
         region: Region for submission (e.g., "Ghana")
     """
     print("=" * 60)
-    print(f"Book Processor v1.0 — {language_name}")
+    print(f"Book Processor v2.0 — {language_name}")
     print("=" * 60)
-    print(f"Guide file: {guide_file if guide_file else 'AI auto-extraction'}")
+    print(f"PDF: {pdf_file}")
     print(f"Language: {language_name} ({language_code})")
     print(f"Region: {region}")
-    print(f"Delay: {SUBMISSION_DELAY}s between submissions")
     print(f"Output: PRIVATE knowledge repo ({KNOWLEDGE_REPO})")
     print("-" * 60)
     sys.stdout.flush()
 
-    # Load topics — from guide file or AI extraction
-    topics = load_topic_guide(guide_file) if guide_file else []
-
-    if not topics:
-        print("  No topic guide found. Extracting topics via AI...")
-        topics = extract_topics_with_ai(language_name)
-
-    if not topics:
-        print("ERROR: No topics to process.")
+    # Check PDF exists
+    pdf_path = os.path.join(BOOKS_DIR, pdf_file)
+    if not os.path.exists(pdf_path):
+        print(f"ERROR: PDF not found at {pdf_path}")
+        print("Make sure the PDF is in the books/ folder.")
         return
-
-    print(f"  Total topics: {len(topics)}")
 
     # Load state from PRIVATE knowledge repo
     state = load_state()
-    book_key = (guide_file if guide_file else language_code) + "-" + language_code
+    book_key = pdf_file.replace('.pdf', '')
 
-    if book_key not in state:
+    # Check if we already have extracted sections cached
+    if book_key not in state or "sections" not in state[book_key]:
+        # Extract text from PDF
+        print("\nExtracting text from PDF...")
+        full_text = extract_pdf_text(pdf_path)
+        if not full_text:
+            print("ERROR: Could not extract text from PDF.")
+            return
+
+        # Split into sections
+        sections = split_into_sections(full_text)
+        if not sections:
+            print("ERROR: No sections extracted.")
+            return
+
+        # Initialize state
         state[book_key] = {
-            "guide_file": guide_file if guide_file else "ai-extracted",
+            "pdf_file": pdf_file,
             "language_name": language_name,
             "language_code": language_code,
             "region": region,
-            "total_topics": len(topics),
-            "completed_topics": [],
-            "failed_topics": [],
+            "total_sections": len(sections),
+            "sections": sections,
+            "completed_sections": [],
+            "failed_sections": [],
             "current_index": 0,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "last_run": "",
         }
+        save_state(state)
+        print(f"  Cached {len(sections)} sections to private repo")
+    else:
+        print(f"\n  Resuming from cached sections in private repo")
 
     book_state = state[book_key]
+    sections = book_state["sections"]
     start_index = book_state.get("current_index", 0)
 
-    print(f"  Resuming from topic {start_index + 1} of {len(topics)}")
-    print(f"  Completed so far: {len(book_state.get('completed_topics', []))}")
+    print(f"  Total sections: {len(sections)}")
+    print(f"  Resuming from section {start_index + 1}")
+    print(f"  Completed so far: {len(book_state.get('completed_sections', []))}")
     print("-" * 60)
     sys.stdout.flush()
 
     submission_count = 0
     failed_count = 0
-    max_in_this_run = min(MAX_TOPICS_PER_RUN, len(topics) - start_index)
+    max_in_this_run = min(MAX_SECTIONS_PER_RUN, len(sections) - start_index)
 
     for i in range(start_index, start_index + max_in_this_run):
-        if i >= len(topics):
+        if i >= len(sections):
             break
 
-        topic_info = topics[i]
-        topic = topic_info["topic"]
-        category = topic_info.get("category", "Language & Proverbs")
+        section_text = sections[i]
+        topic = extract_topic_from_section(section_text, language_name)
+        category = "Language & Proverbs"
 
-        print(f"\n[{i + 1}/{len(topics)}] Topic: {topic}")
-        print(f"  Category: {category}")
+        print(f"\n[{i + 1}/{len(sections)}] {topic}")
         sys.stdout.flush()
 
-        # Generate content
-        knowledge = generate_content(topic, language_name)
+        # Generate lesson from this section's facts
+        knowledge = generate_lesson(section_text, language_name)
 
         if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed_count += 1
-            book_state["failed_topics"].append({"index": i, "topic": topic, "reason": "content_too_short"})
+            book_state["failed_sections"].append({"index": i, "topic": topic, "reason": "content_too_short"})
             print(f"  Failed: content too short ({len(knowledge) if knowledge else 0} chars)")
             book_state["current_index"] = i + 1
             state[book_key] = book_state
             save_state(state)
             continue
 
-        # Strip markdown and AI disclaimers
+        # Clean output
         knowledge = strip_markdown(knowledge)
         knowledge = re.sub(
-            r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
+            r'(?i)(as an AI|as a language model|I am an AI|based on my training)',
             '', knowledge
         ).strip()
 
         if len(knowledge) < MIN_CONTENT_LENGTH:
             failed_count += 1
-            book_state["failed_topics"].append({"index": i, "topic": topic, "reason": "too_short_after_cleaning"})
+            book_state["failed_sections"].append({"index": i, "topic": topic, "reason": "too_short_after_cleaning"})
             book_state["current_index"] = i + 1
             state[book_key] = book_state
             save_state(state)
             continue
 
-        print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
+        print(f"  Lesson: {len(knowledge)} chars (~{len(knowledge.split())} words)")
         sys.stdout.flush()
 
-        # Submit to training form → goes to PRIVATE knowledge repo
+        # Submit
         success, submission_id = submit_to_form(
             topic, category, knowledge, language_code, region
         )
 
         if success:
             submission_count += 1
-            book_state["completed_topics"].append({
+            book_state["completed_sections"].append({
                 "index": i, "topic": topic, "submission_id": submission_id,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             })
             print(f"  Submitted to private repo: {submission_id}")
         else:
             failed_count += 1
-            book_state["failed_topics"].append({"index": i, "topic": topic, "reason": "submission_failed"})
+            book_state["failed_sections"].append({"index": i, "topic": topic, "reason": "submission_failed"})
             print(f"  Submission failed")
 
-        # Update state in PRIVATE knowledge repo
+        # Save progress
         book_state["current_index"] = i + 1
         book_state["last_run"] = datetime.now(timezone.utc).isoformat()
         state[book_key] = book_state
         save_state(state)
 
-        # Delay between submissions
+        # Delay
         if i < start_index + max_in_this_run - 1:
             wait_time = SUBMISSION_DELAY + random.randint(1, 15)
             print(f"  Waiting {wait_time}s...")
             sys.stdout.flush()
             time.sleep(wait_time)
 
-    # Check if complete
-    if book_state["current_index"] >= len(topics):
+    # Status
+    if book_state["current_index"] >= len(sections):
         book_state["completed_at"] = datetime.now(timezone.utc).isoformat()
         state[book_key] = book_state
         save_state(state)
         print(f"\nBOOK COMPLETE: {language_name}")
-        print(f"   Total entries in private repo: {len(book_state['completed_topics'])}")
+        print(f"   Total lessons in private repo: {len(book_state['completed_sections'])}")
     else:
-        print(f"\nPAUSED at topic {book_state['current_index'] + 1} of {len(topics)}")
-        print(f"   Will resume on next run.")
+        print(f"\nPAUSED at section {book_state['current_index'] + 1} of {len(sections)}")
+        print(f"   Will auto-resume in 6 hours.")
 
     print("=" * 60)
     print(f"This run: {submission_count} submitted | {failed_count} failed")
-    print(f"Overall: {len(book_state['completed_topics'])} completed | {len(book_state['failed_topics'])} failed")
+    print(f"Overall: {len(book_state['completed_sections'])} completed")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Process language learning books into knowledge entries.")
-    parser.add_argument("--guide", default="", help="Topic guide filename (optional — AI auto-extracts if blank)")
+    parser = argparse.ArgumentParser(description="Process language learning PDFs into knowledge entries.")
+    parser.add_argument("--pdf", required=True, help="PDF filename in books/ folder")
     parser.add_argument("--language", required=True, help="Language name (e.g., 'Twi')")
     parser.add_argument("--code", required=True, help="Language code (e.g., 'Twi')")
     parser.add_argument("--region", default="Ghana", help="Region (e.g., 'Ghana')")
@@ -706,7 +597,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_book_processor(
-        guide_file=args.guide,
+        pdf_file=args.pdf,
         language_name=args.language,
         language_code=args.code,
         region=args.region,
