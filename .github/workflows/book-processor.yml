@@ -1,13 +1,8 @@
-name: Book Processor — Language Learning
+name: Book Processor
 
 on:
   workflow_dispatch:
     inputs:
-      guide_file:
-        description: 'Topic guide filename (optional — leave blank for AI auto-extraction)'
-        required: false
-        type: string
-        default: ''
       language_name:
         description: 'Language name (e.g., Twi)'
         required: true
@@ -21,8 +16,6 @@ on:
         required: false
         type: string
         default: 'Ghana'
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
   process:
@@ -49,40 +42,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
         run: |
-          if [ -n "${{ github.event.inputs.language_name }}" ]; then
-            python book_processor.py \
-              --guide "${{ github.event.inputs.guide_file }}" \
-              --language "${{ github.event.inputs.language_name }}" \
-              --code "${{ github.event.inputs.language_code }}" \
-              --region "${{ github.event.inputs.region }}"
-          else
-            echo "Checking for in-progress books to resume..."
-            python -c "
-import json, os, base64, requests, subprocess, sys
-state_path = 'admin/book-processor-state.json'
-gh_token = os.getenv('GH_TOKEN')
-repo = os.getenv('KNOWLEDGE_REPO')
-if gh_token and repo:
-    url = f'https://api.github.com/repos/{repo}/contents/{state_path}'
-    headers = {'Authorization': f'token {gh_token}', 'Accept': 'application/vnd.github.v3+json'}
-    r = requests.get(url, headers=headers, timeout=15)
-    if r.status_code == 200:
-        content = r.json().get('content', '')
-        if content:
-            state = json.loads(base64.b64decode(content).decode('utf-8'))
-            for book_key, book_state in state.items():
-                if isinstance(book_state, dict):
-                    current = book_state.get('current_index', 0)
-                    total = book_state.get('total_topics', 0)
-                    if current < total:
-                        print(f'Resuming: {book_key} (topic {current+1} of {total})')
-                        subprocess.run([
-                            sys.executable, 'book_processor.py',
-                            '--guide', book_state.get('guide_file', ''),
-                            '--language', book_state.get('language_name', book_key),
-                            '--code', book_state.get('language_code', book_key),
-                            '--region', book_state.get('region', 'Ghana'),
-                        ])
-                        break
-            "
-          fi
+          python book_processor.py \
+            --guide "" \
+            --language "${{ github.event.inputs.language_name }}" \
+            --code "${{ github.event.inputs.language_code }}" \
+            --region "${{ github.event.inputs.region }}"
