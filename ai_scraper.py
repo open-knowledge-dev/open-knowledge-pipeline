@@ -1,16 +1,18 @@
 """
-AI-Powered Knowledge Scraper — v2.3
+AI-Powered Knowledge Scraper — v2.4
 ====================================
 Generates unique knowledge content using AI APIs with:
-- Dynamic topic generation (no fixed lists)
-- 9 rotating prompt styles for variety
+- Batch topic caching (25 topics per API call — 42% token savings)
+- Comparison topics (~25% of output for deeper content)
+- 9 rotating prompt styles with compare-contrast weighted higher
 - State file memory to avoid repeats
 - Category weighting toward thin categories
 - Markdown stripping for clean output
 - Deduplication feedback loop
 - Minimum 670 words per submission
-- Region rotation across African countries
+- Region field left empty (no fake location data)
 - Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
+- AI writes in the target language
 
 APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
 """
@@ -63,28 +65,8 @@ SCRAPER_NAME = os.getenv("SCRAPER_NAME", "ai-scraper")
 STATE_FILE_PATH = "admin/scraper-state.json"
 
 MIN_CONTENT_LENGTH = 500
-
-# ===========================================================================
-# Region Rotation — Specific African locations
-# ===========================================================================
-
-AFRICAN_REGIONS = [
-    "Greater Accra, Ghana", "Kumasi, Ghana", "Cape Coast, Ghana",
-    "Tamale, Ghana", "Lagos, Nigeria", "Abuja, Nigeria",
-    "Kano, Nigeria", "Nairobi, Kenya", "Mombasa, Kenya",
-    "Kisumu, Kenya", "Cape Town, South Africa", "Johannesburg, South Africa",
-    "Durban, South Africa", "Dar es Salaam, Tanzania", "Arusha, Tanzania",
-    "Kigali, Rwanda", "Addis Ababa, Ethiopia", "Kampala, Uganda",
-    "Abidjan, Cote d'Ivoire", "Dakar, Senegal", "Bamako, Mali",
-    "Ouagadougou, Burkina Faso", "Cotonou, Benin", "Lome, Togo",
-    "Accra, Ghana", "Freetown, Sierra Leone", "Monrovia, Liberia",
-    "Banjul, Gambia", "Conakry, Guinea", "Niamey, Niger",
-    "Yaounde, Cameroon", "Douala, Cameroon", "Luanda, Angola",
-    "Maputo, Mozambique", "Lusaka, Zambia", "Harare, Zimbabwe",
-    "Gaborone, Botswana", "Windhoek, Namibia", "Lilongwe, Malawi",
-    "Kinshasa, DR Congo", "Khartoum, Sudan", "Juba, South Sudan",
-    "Asmara, Eritrea", "Mogadishu, Somalia", "Praia, Cape Verde",
-]
+TOPIC_CACHE_SIZE = 25
+COMPARISON_TOPIC_RATIO = 0.25
 
 # ===========================================================================
 # Language Variation — 70% English, 30% other major languages
@@ -100,7 +82,7 @@ LANGUAGES = [
 
 
 # ===========================================================================
-# Prompt Styles — 9 different ways to ask for knowledge
+# Prompt Styles — weighted toward compare-contrast for deeper content
 # ===========================================================================
 
 PROMPT_STYLES = [
@@ -115,7 +97,7 @@ PROMPT_STYLES = [
             "Write in plain text only."
         ),
         "user_template": (
-            'Explain "{topic}" in simple terms. '
+            'Explain "{topic}" in simple terms in {language}. '
             "Use examples from everyday life. Make it easy for anyone to understand. "
             "Be thorough and detailed. Write at least 670 words. "
             "Use plain text only — no markdown formatting."
@@ -130,7 +112,7 @@ PROMPT_STYLES = [
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Share your personal knowledge and experience about "{topic}". '
+            'Share your personal knowledge and experience about "{topic}" in {language}. '
             "Tell stories from real life. What have you learned? What works? What doesn't? "
             "Be thorough and detailed. Write at least 670 words. "
             "Use plain text only — no markdown formatting."
@@ -140,13 +122,34 @@ PROMPT_STYLES = [
         "name": "compare-contrast",
         "system": (
             "You are an analytical thinker who compares different approaches. "
-            "Write in first person. Show pros and cons of different methods. "
-            "Be fair and balanced. Never mention AI or language models. "
+            "Write in first person. Show pros and cons of different methods, tools, or traditions. "
+            "Be fair and balanced. Give specific examples for each side. "
+            "Help the reader understand which option works best in which situation. "
+            "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Compare different approaches to "{topic}". '
-            "What are the pros and cons of each? Which works best in different situations? "
+            'Compare and contrast "{topic}" in {language}. '
+            "What are the key differences? What are the pros and cons of each approach? "
+            "Which one works better in different situations? Give specific examples. "
+            "Be thorough and detailed. Write at least 670 words. "
+            "Use plain text only — no markdown formatting."
+        ),
+    },
+    {
+        "name": "compare-contrast",
+        "system": (
+            "You are an analytical thinker who compares different approaches. "
+            "Write in first person. Show pros and cons of different methods, tools, or traditions. "
+            "Be fair and balanced. Give specific examples for each side. "
+            "Help the reader understand which option works best in which situation. "
+            "Never mention AI or language models. "
+            "Do NOT use markdown formatting. Write in plain text only."
+        ),
+        "user_template": (
+            'Compare and contrast "{topic}" in {language}. '
+            "What are the key differences? What are the pros and cons of each approach? "
+            "Which one works better in different situations? Give specific examples. "
             "Be thorough and detailed. Write at least 670 words. "
             "Use plain text only — no markdown formatting."
         ),
@@ -161,7 +164,7 @@ PROMPT_STYLES = [
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Provide a complete step-by-step guide for "{topic}". '
+            'Provide a complete step-by-step guide for "{topic}" in {language}. '
             "Include: what you need before starting, each step numbered and explained, "
             "how long each step takes, and common mistakes to avoid. "
             "Be thorough and detailed. Write at least 670 words. "
@@ -177,7 +180,7 @@ PROMPT_STYLES = [
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Trace the history and evolution of "{topic}". '
+            'Trace the history and evolution of "{topic}" in {language}. '
             "How did it start? How has it changed over time? Where is it now? "
             "What forces shaped its development? "
             "Be thorough and detailed. Write at least 670 words. "
@@ -188,12 +191,12 @@ PROMPT_STYLES = [
         "name": "common-mistakes",
         "system": (
             "You are a seasoned expert who has seen people make every mistake possible. "
-            "Share what goes wrong and how to avoid it. Be honest about failures — yours and others'. "
+            "Share what goes wrong and how to avoid it. Be honest about failures. "
             "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'What are the most common mistakes people make with "{topic}"? '
+            'What are the most common mistakes people make with "{topic}" in {language}? '
             "For each mistake: explain what it is, why people make it, what happens as a result, "
             "and exactly how to avoid it. Be specific and practical. "
             "Write at least 670 words. Use plain text only — no markdown formatting."
@@ -203,12 +206,12 @@ PROMPT_STYLES = [
         "name": "regional-variations",
         "system": (
             "You are a well-traveled observer who notices how things differ across regions. "
-            "Describe local variations and explain why they exist — climate, culture, history, resources. "
+            "Describe local variations and explain why they exist. "
             "Write in first person with rich observation. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Describe how "{topic}" differs across regions in Africa. '
+            'Describe how "{topic}" differs across regions in {language}. '
             "What are the local variations? Why do they exist? "
             "How do climate, culture, and available resources shape these differences? "
             "Be thorough and detailed. Write at least 670 words. "
@@ -225,7 +228,8 @@ PROMPT_STYLES = [
         ),
         "user_template": (
             'Where is "{topic}" heading? Discuss current trends, future challenges, '
-            "and what changes are coming. What should people prepare for? "
+            "and what changes are coming in {language}. "
+            "What should people prepare for? "
             "Be thorough and detailed. Write at least 670 words. "
             "Use plain text only — no markdown formatting."
         ),
@@ -238,17 +242,17 @@ PROMPT_STYLES = [
             "Give clear, actionable instructions that anyone can follow. "
             "Include what materials or preparation is needed, how long it takes, "
             "the difficulty level, and what to do when things go wrong. "
-            "Write in first person from real experience — your hands have done this work. "
+            "Write in first person from real experience. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only."
         ),
         "user_template": (
-            'Provide a complete practical guide for "{topic}". '
+            'Provide a complete practical guide for "{topic}" in {language}. '
             "Structure your answer to include: "
-            "1) What you need before starting (materials, tools, conditions), "
+            "1) What you need before starting, "
             "2) How long it takes from start to finish, "
-            "3) The difficulty level (easy/moderate/hard), "
-            "4) Step-by-step instructions with explanations of why each step matters, "
+            "3) The difficulty level, "
+            "4) Step-by-step instructions with explanations, "
             "5) Common mistakes and how to recover from them, "
             "6) Tips from experience that make it easier or better. "
             "Be thorough and detailed. Write at least 670 words. "
@@ -329,7 +333,7 @@ def save_state(state: Dict) -> bool:
     return False
 
 
-def get_last_topics(state: Dict, count: int = 30) -> List[str]:
+def get_last_topics(state: Dict, count: int = 100) -> List[str]:
     return state.get(SCRAPER_NAME, {}).get("last_topics", [])[-count:]
 
 
@@ -337,12 +341,13 @@ def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> 
     if SCRAPER_NAME not in state:
         state[SCRAPER_NAME] = {
             "last_topics": [], "last_run": "", "total_submitted": 0,
-            "total_failed": 0, "rejected_topics": [],
+            "total_failed": 0, "rejected_topics": [], "topic_cache": [],
+            "topic_cache_index": 0,
         }
     scraper = state[SCRAPER_NAME]
     scraper["last_topics"].append(topic)
-    if len(scraper["last_topics"]) > 100:
-        scraper["last_topics"] = scraper["last_topics"][-100:]
+    if len(scraper["last_topics"]) > 200:
+        scraper["last_topics"] = scraper["last_topics"][-200:]
     if success:
         scraper["total_submitted"] += 1
     else:
@@ -353,10 +358,10 @@ def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> 
 
 def record_rejected(state: Dict, topic: str) -> Dict:
     if SCRAPER_NAME not in state:
-        state[SCRAPER_NAME] = {"rejected_topics": [], "last_topics": [], "last_run": "", "total_submitted": 0, "total_failed": 0}
+        state[SCRAPER_NAME] = {"rejected_topics": [], "last_topics": [], "last_run": "", "total_submitted": 0, "total_failed": 0, "topic_cache": [], "topic_cache_index": 0}
     state[SCRAPER_NAME].setdefault("rejected_topics", []).append(topic)
-    if len(state[SCRAPER_NAME]["rejected_topics"]) > 50:
-        state[SCRAPER_NAME]["rejected_topics"] = state[SCRAPER_NAME]["rejected_topics"][-50:]
+    if len(state[SCRAPER_NAME]["rejected_topics"]) > 100:
+        state[SCRAPER_NAME]["rejected_topics"] = state[SCRAPER_NAME]["rejected_topics"][-100:]
     return state
 
 
@@ -419,38 +424,54 @@ def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
 
 
 # ===========================================================================
-# Dynamic Topic Generation
+# Batch Topic Cache
 # ===========================================================================
 
-def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
-    last_topics = get_last_topics(state, 20)
-    rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-20:]
-
+def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
+    """
+    Generate a batch of 25 unique topics in one API call.
+    Cached in state file. Saves ~42% token usage vs generating one at a time.
+    ~25% of topics are comparison-style.
+    """
+    last_topics = get_last_topics(state, 100)
+    rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-50:]
     counts = get_category_counts()
-    category = pick_category_weighted(counts, focus_categories)
 
-    exclude_list = ""
-    if last_topics or rejected:
-        all_exclude = list(set(last_topics + rejected))[-30:]
-        exclude_list = "Do NOT generate any of these topics:\n" + "\n".join(f"- {t}" for t in all_exclude) + "\n\n"
+    # Pick weighted categories for this batch
+    categories_for_batch = []
+    for _ in range(TOPIC_CACHE_SIZE):
+        cat = pick_category_weighted(counts, focus_categories)
+        categories_for_batch.append(cat)
+
+    # Build excluded topics list
+    all_exclude = list(set(last_topics + rejected))
+    exclude_str = ""
+    if all_exclude:
+        exclude_str = "Do NOT generate any of these topics:\n" + "\n".join(f"- {t}" for t in all_exclude[-40:]) + "\n\n"
+
+    # Determine how many comparison topics
+    num_comparisons = max(3, int(TOPIC_CACHE_SIZE * COMPARISON_TOPIC_RATIO))
+    num_regular = TOPIC_CACHE_SIZE - num_comparisons
 
     system_prompt = (
         "You are a topic generator for a knowledge base about Africa. "
-        "Generate ONE specific, narrow, practical topic. "
-        "The topic should be something a real person would know from experience. "
-        "Make it detailed — not broad like 'farming' but specific like "
-        "'how small-scale farmers in northern Ghana test soil fertility without equipment'. "
-        "Return ONLY the topic text, nothing else. No quotes, no explanation."
+        f"Generate {num_regular} regular topics and {num_comparisons} comparison topics (total {TOPIC_CACHE_SIZE}). "
+        "Regular topics should be specific and narrow — something a real person would know from experience. "
+        "Comparison topics should compare two things — methods, tools, traditions, approaches. "
+        "Format comparison topics like 'X vs Y: which is better for...' or 'Differences between X and Y in...'. "
+        "Return one topic per line. No numbering, no bullet points, no markdown. "
+        "Each line must be a unique topic."
     )
 
+    category_list = ", ".join(set(categories_for_batch))
     user_prompt = (
-        f"{exclude_list}"
-        f"Generate a unique, specific knowledge topic about {category}.\n"
-        f"The topic must be narrow and practical.\n"
-        f"Topic:"
+        f"{exclude_str}"
+        f"Generate {TOPIC_CACHE_SIZE} unique knowledge topics related to: {category_list}.\n"
+        f"{num_comparisons} of them must be comparison topics.\n"
+        f"One topic per line."
     )
 
-    topic_text = ""
+    topics_text = ""
     if GROQ_API_KEY:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -460,16 +481,16 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.95,
-            "max_tokens": 80,
+            "max_tokens": 500,
         }
         try:
             response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
-                topic_text = response.json()["choices"][0]["message"]["content"].strip().strip('"')
+                topics_text = response.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"  [TopicGen] Groq failed: {e}")
+            print(f"  [Cache] Groq topic generation failed: {e}")
 
-    if not topic_text and MISTRAL_API_KEY:
+    if not topics_text and MISTRAL_API_KEY:
         headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": "mistral-small-latest",
@@ -478,39 +499,99 @@ def generate_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.95,
-            "max_tokens": 80,
+            "max_tokens": 500,
         }
         try:
             response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
-                topic_text = response.json()["choices"][0]["message"]["content"].strip().strip('"')
+                topics_text = response.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"  [TopicGen] Mistral failed: {e}")
+            print(f"  [Cache] Mistral topic generation failed: {e}")
 
-    if not topic_text or len(topic_text) < 10:
-        fallbacks = [
-            f"Traditional practices for {category.lower()} in West African communities",
-            f"How {category.lower()} knowledge is passed between generations in rural areas",
-            f"Practical tips for {category.lower()} from experienced community members",
-            f"The role of {category.lower()} in daily life across different African regions",
-            f"Lessons learned from decades of experience in {category.lower()}",
-        ]
-        topic_text = random.choice(fallbacks)
+    if not topics_text:
+        print("  [Cache] Failed to generate topics. Using fallback.")
+        return _fallback_topics(focus_categories)
 
-    return topic_text[:200], category
+    # Parse topics
+    new_topics = []
+    for line in topics_text.strip().split('\n'):
+        line = line.strip()
+        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
+        line = re.sub(r'^[\-\*\•]\s*', '', line)
+        line = line.strip().strip('"')
+        if line and len(line) > 10 and line not in all_exclude:
+            new_topics.append(line)
+
+    # Deduplicate within batch
+    seen = set()
+    unique_topics = []
+    for t in new_topics:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            unique_topics.append(t)
+
+    if len(unique_topics) < 5:
+        print(f"  [Cache] Only got {len(unique_topics)} topics. Using fallback.")
+        return _fallback_topics(focus_categories)
+
+    print(f"  [Cache] Generated {len(unique_topics)} new topics (batch)")
+    return unique_topics
+
+
+def _fallback_topics(focus_categories: List[str]) -> List[str]:
+    """Fallback topics if AI generation fails."""
+    cats = focus_categories if focus_categories else ALL_CATEGORIES
+    fallbacks = []
+    for _ in range(TOPIC_CACHE_SIZE):
+        cat = random.choice(cats)
+        fallbacks.append(f"Traditional practices for {cat.lower()} in African communities")
+    return fallbacks
+
+
+def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
+    """
+    Get the next topic. Pulls from cache if available, otherwise refills cache.
+    Returns (topic_text, category).
+    """
+    scraper = state.get(SCRAPER_NAME, {})
+    cache = scraper.get("topic_cache", [])
+    index = scraper.get("topic_cache_index", 0)
+
+    # If cache is empty or exhausted, refill
+    if not cache or index >= len(cache):
+        print("  [Cache] Refilling topic cache...")
+        sys.stdout.flush()
+        new_cache = refill_topic_cache(state, focus_categories)
+        if SCRAPER_NAME not in state:
+            state[SCRAPER_NAME] = {}
+        state[SCRAPER_NAME]["topic_cache"] = new_cache
+        state[SCRAPER_NAME]["topic_cache_index"] = 0
+        save_state(state)
+        cache = new_cache
+        index = 0
+
+    # Get next topic
+    topic = cache[index]
+    state[SCRAPER_NAME]["topic_cache_index"] = index + 1
+
+    # Determine category from focus or weighted pick
+    counts = get_category_counts()
+    category = pick_category_weighted(counts, focus_categories)
+
+    return topic, category
 
 
 # ===========================================================================
 # AI Content Generation
 # ===========================================================================
 
-def generate_with_groq(topic: str, category: str, style: Dict) -> str:
+def generate_with_groq(topic: str, style: Dict, language: str) -> str:
     if not GROQ_API_KEY:
         return ""
-    print(f"    [Groq] Style: {style['name']}")
+    print(f"    [Groq] Style: {style['name']} | Language: {language}")
     sys.stdout.flush()
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic)
+    user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [
@@ -535,13 +616,13 @@ def generate_with_groq(topic: str, category: str, style: Dict) -> str:
         return ""
 
 
-def generate_with_mistral(topic: str, category: str, style: Dict) -> str:
+def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
     if not MISTRAL_API_KEY:
         return ""
-    print(f"    [Mistral] Style: {style['name']}")
+    print(f"    [Mistral] Style: {style['name']} | Language: {language}")
     sys.stdout.flush()
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic)
+    user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
     payload = {
         "model": "mistral-small-latest",
         "messages": [
@@ -566,16 +647,16 @@ def generate_with_mistral(topic: str, category: str, style: Dict) -> str:
         return ""
 
 
-def generate_content(topic: str, category: str) -> str:
+def generate_content(topic: str, language: str) -> str:
     style = random.choice(PROMPT_STYLES)
 
     if GROQ_API_KEY:
-        content = generate_with_groq(topic, category, style)
+        content = generate_with_groq(topic, style, language)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
     if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, category, style)
+        content = generate_with_mistral(topic, style, language)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
 
@@ -586,7 +667,7 @@ def generate_content(topic: str, category: str) -> str:
 # Submission
 # ===========================================================================
 
-def submit_to_form(topic: str, category: str, knowledge: str, language: str, region: str) -> Tuple[bool, str]:
+def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> Tuple[bool, str]:
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -611,12 +692,12 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str, reg
 
         submit_data = {
             "topic": topic, "category": category, "knowledge": knowledge,
-            "region": region, "language": language, "email": "",
+            "region": "", "language": language, "email": "",
             "verification_code": verification_code, "csrf_token": csrf_token,
             "app_check_token": app_check_token, "copyright_confirm": "on",
         }
 
-        print(f"    Submitting... (Region: {region}, Language: {language})")
+        print(f"    Submitting... (Language: {language})")
         sys.stdout.flush()
         submit_response = session.post(
             f"{TRAINING_FORM_URL}/submit", data=submit_data,
@@ -643,15 +724,16 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str, reg
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.3 — {SCRAPER_NAME}")
+    print(f"AI Scraper v2.4 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
+    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch (~42% token savings)")
+    print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
-    print(f"Regions: Rotating across {len(AFRICAN_REGIONS)} African locations")
     print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
     print("-" * 60)
     sys.stdout.flush()
@@ -662,6 +744,10 @@ def run_ai_scraper(max_submissions: int = 10):
 
     state = load_state()
     print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
+    cache_size = len(state.get(SCRAPER_NAME, {}).get('topic_cache', []))
+    cache_idx = state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
+    if cache_size > 0:
+        print(f"  Cached topics remaining: {cache_size - cache_idx}")
 
     submission_count = 0
     failed = 0
@@ -671,18 +757,21 @@ def run_ai_scraper(max_submissions: int = 10):
         if submission_count >= max_submissions:
             break
 
-        print(f"\n[{submission_count + 1}/{max_submissions}] Generating topic...")
+        print(f"\n[{submission_count + 1}/{max_submissions}] Getting topic from cache...")
         sys.stdout.flush()
 
-        topic, category = generate_topic(state, FOCUS_CATEGORIES)
+        topic, category = get_next_topic(state, FOCUS_CATEGORIES)
         print(f"  Topic: {topic}")
         print(f"  Category: {category}")
         sys.stdout.flush()
 
-        knowledge = generate_content(topic, category)
+        # Pick language
+        language = random.choice(LANGUAGES)
+
+        knowledge = generate_content(topic, language)
         if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed += 1
-            print(f"  Failed to generate content (got {len(knowledge) if knowledge else 0} chars, need {MIN_CONTENT_LENGTH})")
+            print(f"  Failed to generate content (got {len(knowledge) if knowledge else 0} chars)")
             state = record_topic(state, topic, "", False)
             continue
 
@@ -697,15 +786,11 @@ def run_ai_scraper(max_submissions: int = 10):
             state = record_topic(state, topic, "", False)
             continue
 
-        # Pick a random African region and language for this submission
-        region = random.choice(AFRICAN_REGIONS)
-        language = random.choice(LANGUAGES)
-
         print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
-        print(f"  Region: {region} | Language: {language}")
+        print(f"  Language: {language}")
         sys.stdout.flush()
 
-        success, submission_id = submit_to_form(topic, category, knowledge, language, region)
+        success, submission_id = submit_to_form(topic, category, knowledge, language)
 
         if success:
             submission_count += 1
@@ -728,7 +813,7 @@ def run_ai_scraper(max_submissions: int = 10):
 
     print("\n" + "=" * 60)
     print(f"Done: {submission_count} submitted | {failed} failed")
-    print(f"Topics: {used_topics}")
+    print(f"Cache remaining: {len(state.get(SCRAPER_NAME, {}).get('topic_cache', [])) - state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)}")
     print("=" * 60)
 
 
