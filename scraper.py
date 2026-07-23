@@ -1,5 +1,5 @@
 """
-Web Knowledge Scraper — v2.2
+Web Knowledge Scraper — v2.3
 =============================
 Searches public domain sources for knowledge content with:
 - Wikipedia as primary source (most relevant)
@@ -10,6 +10,8 @@ Searches public domain sources for knowledge content with:
 - State file memory to avoid repeating URLs and topics
 - Category awareness toward thin categories
 - Multiple rewrite styles for variety
+- Region rotation across African countries
+- Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
 
 Sources: Wikipedia, StackExchange, MDN Web Docs
 """
@@ -46,10 +48,42 @@ FOCUS_CATEGORIES = [c.strip() for c in FOCUS_CATEGORIES_RAW.split(",") if c.stri
 SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-scraper")
 STATE_FILE_PATH = "admin/scraper-state.json"
 
-# Quality thresholds
-MIN_SCRAPED_LENGTH = 500       # Minimum chars from source before we consider it
-MIN_REWRITTEN_LENGTH = 350     # Minimum chars after rewrite
-TARGET_REWRITTEN_LENGTH = 800  # What we aim for
+MIN_SCRAPED_LENGTH = 500
+MIN_REWRITTEN_LENGTH = 350
+
+# ===========================================================================
+# Region Rotation
+# ===========================================================================
+
+AFRICAN_REGIONS = [
+    "Greater Accra, Ghana", "Kumasi, Ghana", "Cape Coast, Ghana",
+    "Tamale, Ghana", "Lagos, Nigeria", "Abuja, Nigeria",
+    "Kano, Nigeria", "Nairobi, Kenya", "Mombasa, Kenya",
+    "Kisumu, Kenya", "Cape Town, South Africa", "Johannesburg, South Africa",
+    "Durban, South Africa", "Dar es Salaam, Tanzania", "Arusha, Tanzania",
+    "Kigali, Rwanda", "Addis Ababa, Ethiopia", "Kampala, Uganda",
+    "Abidjan, Cote d'Ivoire", "Dakar, Senegal", "Bamako, Mali",
+    "Ouagadougou, Burkina Faso", "Cotonou, Benin", "Lome, Togo",
+    "Accra, Ghana", "Freetown, Sierra Leone", "Monrovia, Liberia",
+    "Banjul, Gambia", "Conakry, Guinea", "Niamey, Niger",
+    "Yaounde, Cameroon", "Douala, Cameroon", "Luanda, Angola",
+    "Maputo, Mozambique", "Lusaka, Zambia", "Harare, Zimbabwe",
+    "Gaborone, Botswana", "Windhoek, Namibia", "Lilongwe, Malawi",
+    "Kinshasa, DR Congo", "Khartoum, Sudan", "Juba, South Sudan",
+    "Asmara, Eritrea", "Mogadishu, Somalia", "Praia, Cape Verde",
+]
+
+# ===========================================================================
+# Language Variation
+# ===========================================================================
+
+LANGUAGES = [
+    "English", "English", "English", "English", "English", "English", "English",
+    "Français (French)", "Français (French)",
+    "Português (Portuguese)",
+    "العربية (Arabic)",
+    "Kiswahili (Swahili)",
+]
 
 ALL_CATEGORIES = [
     "Agriculture & Farming", "Business & Finance", "Culture & Traditions",
@@ -292,12 +326,6 @@ def pick_topic_for_category(category: str, state: Dict) -> str:
 # ===========================================================================
 
 def is_content_relevant(topic: str, content: str) -> bool:
-    """
-    Check if the scraped content is actually about the topic.
-    Extracts significant words from the topic and checks if they
-    appear in the content. At least 2 topic words must match.
-    """
-    # Extract meaningful words from topic (3+ characters, not common words)
     stop_words = {
         "the", "and", "for", "with", "that", "this", "from", "are", "was",
         "have", "has", "had", "not", "but", "its", "can", "all", "will",
@@ -312,12 +340,9 @@ def is_content_relevant(topic: str, content: str) -> bool:
         if w.lower() not in stop_words
     ]
     if not topic_words:
-        return True  # Can't check, accept it
-
+        return True
     content_lower = content.lower()
     matches = sum(1 for w in topic_words if w in content_lower)
-
-    # Need at least 2 topic words in the content, or 50% of topic words
     threshold = max(2, len(topic_words) // 2)
     return matches >= threshold
 
@@ -327,10 +352,6 @@ def is_content_relevant(topic: str, content: str) -> bool:
 # ===========================================================================
 
 def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
-    """
-    Search Wikipedia. Always the most relevant source.
-    Returns (content, source_url) or None.
-    """
     print(f"    [Wikipedia] {topic[:60]}...")
     sys.stdout.flush()
     try:
@@ -339,14 +360,12 @@ def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
             "action": "query", "list": "search", "srsearch": topic,
             "format": "json", "srlimit": 3,
         }
-        headers = {"User-Agent": "KnowledgePipeline/2.2"}
+        headers = {"User-Agent": "KnowledgePipeline/2.3"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         results = data.get("query", {}).get("search", [])
         if not results:
             return None
-
-        # Try up to 3 results until we get a long enough extract
         for result in results[:3]:
             page_title = result["title"]
             extract_params = {
@@ -364,7 +383,6 @@ def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
                         print(f"    Got {len(extract)} chars — relevant")
                         sys.stdout.flush()
                         return extract[:5000], url
-
         return None
     except Exception as e:
         print(f"    Wikipedia error: {e}")
@@ -372,10 +390,6 @@ def search_wikipedia(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
-    """
-    Search Stack Exchange. Only use for technology/programming topics.
-    Returns (content, source_url) or None.
-    """
     tech_keywords = [
         "programming", "code", "software", "developer", "web", "app",
         "database", "server", "API", "framework", "JavaScript", "Python",
@@ -387,7 +401,6 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
     ]
     if not any(kw.lower() in topic.lower() for kw in tech_keywords):
         return None
-
     print(f"    [StackExchange] {topic[:60]}...")
     sys.stdout.flush()
     try:
@@ -396,7 +409,7 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
             "order": "desc", "sort": "votes", "q": topic,
             "site": "stackoverflow", "pagesize": 1, "filter": "withbody",
         }
-        headers = {"User-Agent": "KnowledgePipeline/2.2"}
+        headers = {"User-Agent": "KnowledgePipeline/2.3"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -420,10 +433,6 @@ def search_stackexchange(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
-    """
-    Search MDN Web Docs. Only use for web development topics.
-    Returns (content, source_url) or None.
-    """
     web_keywords = [
         "HTML", "CSS", "JavaScript", "DOM", "accessibility", "responsive",
         "Flexbox", "Grid", "animation", "transition", "event", "fetch",
@@ -433,13 +442,12 @@ def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
     ]
     if not any(kw.lower() in topic.lower() for kw in web_keywords):
         return None
-
     print(f"    [MDN] {topic[:60]}...")
     sys.stdout.flush()
     try:
         search_url = "https://developer.mozilla.org/api/v1/search"
         params = {"q": topic, "locale": "en-US"}
-        headers = {"User-Agent": "KnowledgePipeline/2.2"}
+        headers = {"User-Agent": "KnowledgePipeline/2.3"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -460,35 +468,23 @@ def search_mdn(topic: str) -> Optional[Tuple[str, str]]:
 
 
 def fetch_content(topic: str, category: str, state: Dict) -> Optional[Tuple[str, str]]:
-    """
-    Fetch content from the best available source.
-    Wikipedia first (always try). Then StackExchange (tech only).
-    Then MDN (web only). Skips previously scraped URLs.
-    """
     scraped_urls = get_scraped_urls(state)
-
-    # Wikipedia is always the best source — try it first
     result = search_wikipedia(topic)
     if result:
         content, url = result
         if url not in scraped_urls:
             return content, url
-
-    # For tech topics, try StackExchange
     if category in ["Technology & Innovation", "Science & Innovation", "Education & Learning"]:
         result = search_stackexchange(topic)
         if result:
             content, url = result
             if url not in scraped_urls:
                 return content, url
-
-    # For web-specific topics, try MDN
     result = search_mdn(topic)
     if result:
         content, url = result
         if url not in scraped_urls:
             return content, url
-
     return None
 
 
@@ -497,14 +493,8 @@ def fetch_content(topic: str, category: str, state: Dict) -> Optional[Tuple[str,
 # ===========================================================================
 
 def rewrite_content(original: str, topic: str, category: str) -> str:
-    """
-    Rewrite scraped content in a conversational first-person voice.
-    Uses randomized personal starters and one of three rewrite styles.
-    Requires at least 500 chars of source material for quality output.
-    """
     if len(original) < MIN_SCRAPED_LENGTH:
         return ""
-
     personal_starters = [
         "In my community, we", "Growing up, I learned that",
         "My grandmother taught me that", "Many people in our region believe",
@@ -528,7 +518,6 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
         "The real trick to making this work is",
         "Nobody teaches you this in school, but",
     ]
-
     conclusions = [
         "This knowledge has been passed down through generations.",
         "I share this because it's important for the next generation.",
@@ -541,19 +530,13 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
         "The old ways have wisdom that modern life forgets.",
         "Take this advice and make it your own.",
     ]
-
     starter = random.choice(personal_starters)
     sentences = re.split(r'(?<=[.!?])\s+', original)
     key_sentences = [s.strip() for s in sentences if 30 < len(s.strip()) < 500]
-
     if not key_sentences:
         return ""
-
-    # Use more sentences for longer output — aim for TARGET_REWRITTEN_LENGTH
     max_sentences = min(len(key_sentences), 12)
-
     style = random.choice(["narrative", "instructional", "comparative"])
-
     if style == "narrative":
         rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
         for sentence in key_sentences[1:max_sentences]:
@@ -564,18 +547,14 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
             rewritten += f"{i}. {sentence}\n\n"
     else:
         rewritten = f"{starter} {key_sentences[0].lower()}\n\n"
-        midpoint = max_sentences // 2
         if len(key_sentences) >= 3:
             rewritten += f"On one hand, {key_sentences[1].lower()}\n\n"
             rewritten += f"On the other hand, {key_sentences[min(2, len(key_sentences)-1)].lower()}\n\n"
         for sentence in key_sentences[3:max_sentences]:
             rewritten += f"{sentence}\n\n"
-
     rewritten += random.choice(conclusions)
-
     if len(rewritten) < MIN_REWRITTEN_LENGTH:
         rewritten += "\n\nThis is knowledge that matters in daily life. I am sharing what I know so others can benefit from it. What I have learned comes from real experience, not from books or the internet."
-
     return rewritten[:50000]
 
 
@@ -583,8 +562,7 @@ def rewrite_content(original: str, topic: str, category: str) -> str:
 # Submission
 # ===========================================================================
 
-def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
-    """Submit to training form. Returns (success, submission_id)."""
+def submit_to_form(topic: str, category: str, knowledge: str, language: str, region: str) -> Tuple[bool, str]:
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -593,33 +571,27 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
         if form_response.status_code != 200:
             return False, ""
         html = form_response.text
-
         csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
         if not csrf_match:
             return False, ""
         csrf_token = csrf_match.group(1)
-
         code_match = re.search(r'verification-code[^>]*>(\d{6})<', html)
         if not code_match:
             return False, ""
         verification_code = code_match.group(1)
-
         app_check_token = SCRAPER_API_KEY if SCRAPER_API_KEY else ""
-
         submit_data = {
             "topic": topic, "category": category, "knowledge": knowledge,
-            "region": "Various regions", "language": "English", "email": "",
+            "region": region, "language": language, "email": "",
             "verification_code": verification_code, "csrf_token": csrf_token,
             "app_check_token": app_check_token, "copyright_confirm": "on",
         }
-
-        print(f"    Submitting...")
+        print(f"    Submitting... (Region: {region}, Language: {language})")
         sys.stdout.flush()
         submit_response = session.post(
             f"{TRAINING_FORM_URL}/submit", data=submit_data,
             timeout=REQUEST_TIMEOUT, allow_redirects=True,
         )
-
         if submit_response.status_code == 200:
             id_match = re.search(r'GHGPT-\d{4}-\d{4}', submit_response.text)
             submission_id = id_match.group(0) if id_match else "unknown"
@@ -639,14 +611,15 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 # ===========================================================================
 
 def run_scraper(max_submissions: int = 10):
-    """Main scraper loop with quality gates and state tracking."""
     print("=" * 60)
-    print(f"Web Scraper v2.2 — {SCRAPER_NAME}")
+    print(f"Web Scraper v2.3 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Min source: {MIN_SCRAPED_LENGTH} chars | Min rewrite: {MIN_REWRITTEN_LENGTH} chars")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
+    print(f"Regions: Rotating across {len(AFRICAN_REGIONS)} African locations")
+    print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -656,58 +629,48 @@ def run_scraper(max_submissions: int = 10):
     submission_count = 0
     skipped = 0
     failed = 0
-
-    # Try up to 4x max_submissions to account for skips
     max_attempts = max_submissions * 4
 
     for i in range(max_attempts):
         if submission_count >= max_submissions:
             break
-
         print(f"\n[{submission_count + 1}/{max_submissions}] Selecting topic...")
         sys.stdout.flush()
-
         category = pick_category()
         topic = pick_topic_for_category(category, state)
         print(f"  Topic: {topic}")
         print(f"  Category: {category}")
         sys.stdout.flush()
-
         result = fetch_content(topic, category, state)
         if not result:
             skipped += 1
             print(f"  No relevant content found, skipping")
             continue
-
         original_text, source_url = result
-
         if len(original_text) < MIN_SCRAPED_LENGTH:
             skipped += 1
             print(f"  Content too short ({len(original_text)} chars < {MIN_SCRAPED_LENGTH}), skipping")
             continue
-
         rewritten = rewrite_content(original_text, topic, category)
-
         if len(rewritten) < MIN_REWRITTEN_LENGTH:
             skipped += 1
             print(f"  Rewrite too short ({len(rewritten)} chars < {MIN_REWRITTEN_LENGTH}), skipping")
             continue
-
+        # Pick random region and language
+        region = random.choice(AFRICAN_REGIONS)
+        language = random.choice(LANGUAGES)
         print(f"  Content: {len(rewritten)} chars")
+        print(f"  Region: {region} | Language: {language}")
         sys.stdout.flush()
-
-        success, submission_id = submit_to_form(topic, category, rewritten)
-
+        success, submission_id = submit_to_form(topic, category, rewritten, language, region)
         if success:
             submission_count += 1
             state = record_submission(state, topic, source_url, True)
         else:
             failed += 1
             state = record_submission(state, topic, source_url, False)
-
         if GH_TOKEN:
             save_state(state)
-
         if submission_count < max_submissions:
             wait_time = SUBMISSION_DELAY + random.randint(1, 15)
             print(f"  Waiting {wait_time}s...")
