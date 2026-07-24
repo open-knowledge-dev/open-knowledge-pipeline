@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
           SUBMISSIONS_PER_RUN: '10'
-          SUBMISSION_DELAY: '30'
+          SUBMISSION_DELAY: '45'
           SCRAPER_NAME: 'ai-groq-history'
           FOCUS_CATEGORIES: 'History & Heritage,Governance & Leadership,Religion & Spirituality'
         run: python ai_scraper.py
