@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
           SUBMISSIONS_PER_RUN: '5'
-          SUBMISSION_DELAY: '30'
+          SUBMISSION_DELAY: '45'
           SCRAPER_NAME: 'ai-mistral-language'
           FOCUS_CATEGORIES: 'Language & Proverbs,Education & Learning,Family & Relationships'
         run: python ai_scraper.py
