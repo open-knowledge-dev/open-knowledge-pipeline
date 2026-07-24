@@ -1,10 +1,10 @@
 """
-AI-Powered Knowledge Scraper — v2.4
-====================================
+AI-Powered Knowledge Scraper — v2.4.1
+======================================
 Generates unique knowledge content using AI APIs with:
 - Batch topic caching (25 topics per API call — 42% token savings)
 - Comparison topics (~25% of output for deeper content)
-- 9 rotating prompt styles with compare-contrast weighted higher
+- 10 rotating prompt styles with compare-contrast weighted higher
 - State file memory to avoid repeats
 - Category weighting toward thin categories
 - Markdown stripping for clean output
@@ -13,6 +13,7 @@ Generates unique knowledge content using AI APIs with:
 - Region field left empty (no fake location data)
 - Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
 - AI writes in the target language
+- Fixed state file key initialization to prevent KeyError crashes
 
 APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
 """
@@ -290,6 +291,20 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 
+def _init_scraper_state(state: Dict) -> None:
+    """Ensure all required keys exist in scraper state to prevent KeyError."""
+    if SCRAPER_NAME not in state:
+        state[SCRAPER_NAME] = {}
+    scraper = state[SCRAPER_NAME]
+    scraper.setdefault("last_topics", [])
+    scraper.setdefault("last_run", "")
+    scraper.setdefault("total_submitted", 0)
+    scraper.setdefault("total_failed", 0)
+    scraper.setdefault("rejected_topics", [])
+    scraper.setdefault("topic_cache", [])
+    scraper.setdefault("topic_cache_index", 0)
+
+
 def load_state() -> Dict:
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
@@ -300,10 +315,14 @@ def load_state() -> Dict:
             content_b64 = response.json().get("content", "")
             if content_b64:
                 decoded = base64.b64decode(content_b64).decode("utf-8")
-                return json.loads(decoded)
+                state = json.loads(decoded)
+                _init_scraper_state(state)
+                return state
     except Exception as e:
         print(f"  [State] Load failed: {e}")
-    return {}
+    state = {}
+    _init_scraper_state(state)
+    return state
 
 
 def save_state(state: Dict) -> bool:
@@ -334,16 +353,12 @@ def save_state(state: Dict) -> bool:
 
 
 def get_last_topics(state: Dict, count: int = 100) -> List[str]:
-    return state.get(SCRAPER_NAME, {}).get("last_topics", [])[-count:]
+    scraper = state.get(SCRAPER_NAME, {})
+    return scraper.get("last_topics", [])[-count:]
 
 
 def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> Dict:
-    if SCRAPER_NAME not in state:
-        state[SCRAPER_NAME] = {
-            "last_topics": [], "last_run": "", "total_submitted": 0,
-            "total_failed": 0, "rejected_topics": [], "topic_cache": [],
-            "topic_cache_index": 0,
-        }
+    _init_scraper_state(state)
     scraper = state[SCRAPER_NAME]
     scraper["last_topics"].append(topic)
     if len(scraper["last_topics"]) > 200:
@@ -357,11 +372,11 @@ def record_topic(state: Dict, topic: str, submission_id: str, success: bool) -> 
 
 
 def record_rejected(state: Dict, topic: str) -> Dict:
-    if SCRAPER_NAME not in state:
-        state[SCRAPER_NAME] = {"rejected_topics": [], "last_topics": [], "last_run": "", "total_submitted": 0, "total_failed": 0, "topic_cache": [], "topic_cache_index": 0}
-    state[SCRAPER_NAME].setdefault("rejected_topics", []).append(topic)
-    if len(state[SCRAPER_NAME]["rejected_topics"]) > 100:
-        state[SCRAPER_NAME]["rejected_topics"] = state[SCRAPER_NAME]["rejected_topics"][-100:]
+    _init_scraper_state(state)
+    scraper = state[SCRAPER_NAME]
+    scraper["rejected_topics"].append(topic)
+    if len(scraper["rejected_topics"]) > 100:
+        scraper["rejected_topics"] = scraper["rejected_topics"][-100:]
     return state
 
 
@@ -428,28 +443,20 @@ def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
 # ===========================================================================
 
 def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
-    """
-    Generate a batch of 25 unique topics in one API call.
-    Cached in state file. Saves ~42% token usage vs generating one at a time.
-    ~25% of topics are comparison-style.
-    """
     last_topics = get_last_topics(state, 100)
     rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-50:]
     counts = get_category_counts()
 
-    # Pick weighted categories for this batch
     categories_for_batch = []
     for _ in range(TOPIC_CACHE_SIZE):
         cat = pick_category_weighted(counts, focus_categories)
         categories_for_batch.append(cat)
 
-    # Build excluded topics list
     all_exclude = list(set(last_topics + rejected))
     exclude_str = ""
     if all_exclude:
         exclude_str = "Do NOT generate any of these topics:\n" + "\n".join(f"- {t}" for t in all_exclude[-40:]) + "\n\n"
 
-    # Determine how many comparison topics
     num_comparisons = max(3, int(TOPIC_CACHE_SIZE * COMPARISON_TOPIC_RATIO))
     num_regular = TOPIC_CACHE_SIZE - num_comparisons
 
@@ -512,7 +519,6 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
         print("  [Cache] Failed to generate topics. Using fallback.")
         return _fallback_topics(focus_categories)
 
-    # Parse topics
     new_topics = []
     for line in topics_text.strip().split('\n'):
         line = line.strip()
@@ -522,7 +528,6 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
         if line and len(line) > 10 and line not in all_exclude:
             new_topics.append(line)
 
-    # Deduplicate within batch
     seen = set()
     unique_topics = []
     for t in new_topics:
@@ -539,7 +544,6 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
 
 
 def _fallback_topics(focus_categories: List[str]) -> List[str]:
-    """Fallback topics if AI generation fails."""
     cats = focus_categories if focus_categories else ALL_CATEGORIES
     fallbacks = []
     for _ in range(TOPIC_CACHE_SIZE):
@@ -549,32 +553,24 @@ def _fallback_topics(focus_categories: List[str]) -> List[str]:
 
 
 def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
-    """
-    Get the next topic. Pulls from cache if available, otherwise refills cache.
-    Returns (topic_text, category).
-    """
-    scraper = state.get(SCRAPER_NAME, {})
+    _init_scraper_state(state)
+    scraper = state[SCRAPER_NAME]
     cache = scraper.get("topic_cache", [])
     index = scraper.get("topic_cache_index", 0)
 
-    # If cache is empty or exhausted, refill
     if not cache or index >= len(cache):
         print("  [Cache] Refilling topic cache...")
         sys.stdout.flush()
         new_cache = refill_topic_cache(state, focus_categories)
-        if SCRAPER_NAME not in state:
-            state[SCRAPER_NAME] = {}
         state[SCRAPER_NAME]["topic_cache"] = new_cache
         state[SCRAPER_NAME]["topic_cache_index"] = 0
         save_state(state)
         cache = new_cache
         index = 0
 
-    # Get next topic
     topic = cache[index]
     state[SCRAPER_NAME]["topic_cache_index"] = index + 1
 
-    # Determine category from focus or weighted pick
     counts = get_category_counts()
     category = pick_category_weighted(counts, focus_categories)
 
@@ -649,17 +645,14 @@ def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
 
 def generate_content(topic: str, language: str) -> str:
     style = random.choice(PROMPT_STYLES)
-
     if GROQ_API_KEY:
         content = generate_with_groq(topic, style, language)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
-
     if MISTRAL_API_KEY:
         content = generate_with_mistral(topic, style, language)
         if content and len(content) >= MIN_CONTENT_LENGTH:
             return content
-
     return ""
 
 
@@ -724,7 +717,7 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.4 — {SCRAPER_NAME}")
+    print(f"AI Scraper v2.4.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
@@ -743,6 +736,7 @@ def run_ai_scraper(max_submissions: int = 10):
         return
 
     state = load_state()
+    _init_scraper_state(state)
     print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
     cache_size = len(state.get(SCRAPER_NAME, {}).get('topic_cache', []))
     cache_idx = state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
@@ -765,7 +759,6 @@ def run_ai_scraper(max_submissions: int = 10):
         print(f"  Category: {category}")
         sys.stdout.flush()
 
-        # Pick language
         language = random.choice(LANGUAGES)
 
         knowledge = generate_content(topic, language)
@@ -813,7 +806,8 @@ def run_ai_scraper(max_submissions: int = 10):
 
     print("\n" + "=" * 60)
     print(f"Done: {submission_count} submitted | {failed} failed")
-    print(f"Cache remaining: {len(state.get(SCRAPER_NAME, {}).get('topic_cache', [])) - state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)}")
+    cache_remaining = len(state.get(SCRAPER_NAME, {}).get('topic_cache', [])) - state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
+    print(f"Cache remaining: {max(0, cache_remaining)}")
     print("=" * 60)
 
 
