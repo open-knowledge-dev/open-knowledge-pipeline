@@ -1,0 +1,32 @@
+name: Database Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary supabase
+
+      - name: Run database sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          NEON_URL: ${{ secrets.NEON_URL }}
+          FLY_PG_URL: ${{ secrets.FLY_PG_URL }}
+        run: python db_sync.py
