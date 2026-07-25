@@ -1,5 +1,5 @@
 """
-Database Sync — v1.0
+Database Sync — v1.1
 =====================
 Syncs database submission status with GitHub repo state.
 Runs once daily.
@@ -10,7 +10,7 @@ What it does:
 - Updates database status to "approved" for those files
 - Updates pending_filename to match actual file location
 
-Runs after batch_mover.py has moved files.
+Fixed: GitHub API pagination now handled correctly.
 """
 
 import os
@@ -72,34 +72,64 @@ def _github_headers():
     }
 
 
-def list_folder_files(folder: str) -> List[Dict]:
-    """List all files in a category folder."""
+def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
+    """
+    List .md files in a category folder with proper pagination.
+    Returns list of file info dicts.
+    """
     all_files = []
     page = 1
+
     while True:
         url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{folder}"
         params = {"page": page, "per_page": 100}
+
         try:
             response = requests.get(url, headers=_github_headers(), params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                if not data:
+            if response.status_code != 200:
+                break
+
+            data = response.json()
+
+            # If data is a dict instead of list, it's a single file, not a folder
+            if isinstance(data, dict):
+                if data.get("name", "").endswith(".md"):
+                    all_files.append(data)
+                break
+
+            # If data is a list, process each item
+            if isinstance(data, list):
+                if len(data) == 0:
                     break
+
                 for item in data:
-                    if item["name"].endswith(".md"):
+                    if item.get("name", "").endswith(".md"):
+                        # Skip .gitkeep files
+                        if item["name"] == ".gitkeep":
+                            continue
                         all_files.append(item)
+
+                # If we got fewer than requested, we're done
                 if len(data) < 100:
                     break
+
                 page += 1
+
+                # Safety limit
+                if len(all_files) >= max_files:
+                    break
             else:
                 break
-        except Exception:
+
+        except Exception as e:
+            print(f"    Error listing {folder}: {e}")
             break
+
     return all_files
 
 
 def get_file_content(path: str) -> Optional[str]:
-    """Get file content and extract submission ID."""
+    """Get file content and return decoded text."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     try:
         response = requests.get(url, headers=_github_headers(), timeout=15)
@@ -142,7 +172,7 @@ def update_database(submission_id: str, filename: str) -> int:
             }).eq("submission_id", submission_id).execute()
             updated += 1
         except Exception as e:
-            print(f"    Supabase: {e}")
+            print(f"    Supabase error for {submission_id}: {e}")
 
     # Neon
     if NEON_URL:
@@ -158,7 +188,7 @@ def update_database(submission_id: str, filename: str) -> int:
             conn.close()
             updated += 1
         except Exception as e:
-            print(f"    Neon: {e}")
+            print(f"    Neon error for {submission_id}: {e}")
 
     # Fly.io PG
     if FLY_PG_URL:
@@ -174,7 +204,7 @@ def update_database(submission_id: str, filename: str) -> int:
             conn.close()
             updated += 1
         except Exception as e:
-            print(f"    Fly.io PG: {e}")
+            print(f"    Fly.io PG error for {submission_id}: {e}")
 
     return updated
 
@@ -186,9 +216,10 @@ def update_database(submission_id: str, filename: str) -> int:
 def run_db_sync():
     """Scan category folders and sync database status."""
     print("=" * 60)
-    print("Database Sync v1.0")
+    print("Database Sync v1.1")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
+    print(f"Databases: {'Supabase' if SUPABASE_URL else '?'}, {'Neon' if NEON_URL else '?'}, {'FlyPG' if FLY_PG_URL else '?'}")
     sys.stdout.flush()
 
     if not GITHUB_TOKEN or not KNOWLEDGE_REPO:
@@ -197,39 +228,61 @@ def run_db_sync():
 
     total_synced = 0
     total_checked = 0
+    total_files_found = 0
 
     for folder_slug, category_name in CATEGORY_SLUGS.items():
         print(f"\nScanning {folder_slug}/...")
         sys.stdout.flush()
 
-        files = list_folder_files(folder_slug)
-        print(f"  Found {len(files)} files")
+        files = list_folder_files(folder_slug, max_files=500)
+        folder_count = len(files)
+        total_files_found += folder_count
+        print(f"  Found {folder_count} files")
 
-        # Only check a sample from each folder (first 200 files)
-        sample = files[:200]
+        if folder_count == 0:
+            continue
+
+        # Process a sample from each folder
+        sample_size = min(folder_count, 200)
+        sample = files[:sample_size]
 
         for file_info in sample:
             file_path = file_info["path"]
             total_checked += 1
 
-            content = get_file_content(file_path)
-            if not content:
-                continue
-
-            submission_id = extract_submission_id(content)
-            if not submission_id:
-                continue
+            # Skip reading file content — extract submission ID from filename
+            # The filename format is: YYYYMMDD-HHMMSS-topic-SUBID.md or topic-SUBID.md
+            filename = file_info["name"]
+            id_match = re.search(r'(GHGPT-\d{4}-\d{4})', filename)
+            if not id_match:
+                # Try reading the file for the ID
+                content = get_file_content(file_path)
+                if content:
+                    id_match = re.search(r'\*\*Submission ID:\*\*\s*(GHGPT-\d{4}-\d{4})', content)
+                    if id_match:
+                        submission_id = id_match.group(1)
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                submission_id = id_match.group(1)
 
             # Update database
             db_count = update_database(submission_id, file_path)
             if db_count > 0:
                 total_synced += 1
-                if total_synced % 50 == 0:
-                    print(f"  Synced: {total_synced}")
-                    sys.stdout.flush()
+
+            if total_synced % 100 == 0 and total_synced > 0:
+                print(f"  Synced: {total_synced}")
+
+        print(f"  Processed {sample_size} files from {folder_slug}/")
 
     print("\n" + "=" * 60)
-    print(f"SYNC COMPLETE: {total_synced} updated | {total_checked} checked")
+    print(f"SYNC COMPLETE")
+    print(f"  Files found across all folders: {total_files_found}")
+    print(f"  Files checked: {total_checked}")
+    print(f"  Database records updated: {total_synced}")
     print("=" * 60)
 
 
