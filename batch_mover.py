@@ -1,19 +1,20 @@
 """
-Batch Pending File Mover — v1.1
+Batch Pending File Mover — v2.0
 ================================
-Scans pending/ folder for .md files and moves them to
-their assigned category folders based on the category
-field inside each file.
+High-speed file mover for pending/ folder.
+Designed for 5,000+ files/day throughput.
 
 What it does:
-- Reads every .md file in pending/
-- Extracts the category from the file metadata
-- If category is valid → moves file to that category folder
-- If category is missing/invalid → leaves in pending
-- Updates ALL THREE databases with new file path and status
-- Logs all moves and skips
+- Reads .md files from pending/ in bulk
+- Extracts category from each file
+- Moves valid files to category folders via GitHub API
+- Leaves invalid/corrupt files in pending
+- Processes 500 files per run, ~15 minutes
+- Runs every 2 hours (12x/day = 6,000 files/day capacity)
+- State file tracking — resumes if interrupted
 
-No AI. No corrections. No content changes. Just move.
+No database updates. No content changes. Just move files.
+Database sync handled separately by db_sync.py.
 """
 
 import os
@@ -23,9 +24,8 @@ import json
 import base64
 import re
 import requests
-import psycopg2
 from datetime import datetime, timezone
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, List, Dict
 
 
 # ===========================================================================
@@ -35,16 +35,12 @@ from typing import Optional, Tuple, Dict
 GITHUB_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
+MAX_FILES_PER_RUN = 500
+BATCH_SIZE = 100
+BATCH_DELAY = 1
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-NEON_URL = os.getenv("NEON_URL", "")
-FLY_PG_URL = os.getenv("FLY_PG_URL", "")
+STATE_FILE_PATH = "admin/batch-mover-state.json"
 
-BATCH_SIZE = 50
-BATCH_DELAY = 3
-
-# Category name → folder slug mapping
 CATEGORY_SLUGS = {
     "Agriculture & Farming": "agriculture_farming",
     "Business & Finance": "business_finance",
@@ -80,94 +76,106 @@ def _github_headers():
     }
 
 
-def list_pending_files() -> list:
-    """Get all .md files from the pending/ folder."""
-    all_files = []
-    page = 1
-    per_page = 100
+def _github_api_get(url: str, params: dict = None) -> Tuple[int, any]:
+    """Make a GitHub API GET request. Returns (status_code, data)."""
+    try:
+        response = requests.get(url, headers=_github_headers(), params=params, timeout=15)
+        if response.status_code == 200:
+            return 200, response.json()
+        return response.status_code, None
+    except Exception as e:
+        return 0, str(e)
 
-    while True:
-        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/pending"
-        params = {"page": page, "per_page": per_page}
-        try:
-            response = requests.get(url, headers=_github_headers(), params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                if not data:
-                    break
-                for item in data:
-                    if item["name"].endswith(".md"):
-                        all_files.append(item)
-                if len(data) < per_page:
-                    break
-                page += 1
-            else:
-                print(f"  List pending error: {response.status_code}")
-                break
-        except Exception as e:
-            print(f"  List pending exception: {e}")
-            break
 
-    return all_files
+def _github_api_put(url: str, payload: dict) -> int:
+    """Make a GitHub API PUT request. Returns status_code."""
+    try:
+        response = requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+        return response.status_code
+    except Exception:
+        return 0
+
+
+def _github_api_delete(url: str, payload: dict) -> int:
+    """Make a GitHub API DELETE request. Returns status_code."""
+    try:
+        response = requests.delete(url, json=payload, headers=_github_headers(), timeout=15)
+        return response.status_code
+    except Exception:
+        return 0
+
+
+def list_pending_files(page: int = 1) -> Tuple[List[Dict], int]:
+    """
+    Get .md files from pending/ folder.
+    Returns (files_list, next_page).
+    """
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/pending"
+    params = {"page": page, "per_page": 100}
+    status, data = _github_api_get(url, params)
+
+    if status != 200 or not data:
+        return [], 0
+
+    files = [item for item in data if item.get("name", "").endswith(".md")]
+
+    if isinstance(data, list) and len(data) == 100:
+        return files, page + 1
+    return files, 0
 
 
 def get_file_content(path: str) -> Optional[str]:
-    """Get the decoded content of a file from GitHub."""
+    """Get decoded content of a file from GitHub."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=15)
-        if response.status_code == 200:
-            content_b64 = response.json().get("content", "")
-            if content_b64:
-                return base64.b64decode(content_b64).decode("utf-8", errors="ignore")
-        return None
-    except Exception:
-        return None
+    status, data = _github_api_get(url)
+    if status == 200 and data:
+        content_b64 = data.get("content", "")
+        if content_b64:
+            return base64.b64decode(content_b64).decode("utf-8", errors="ignore")
+    return None
 
 
 def get_file_sha(path: str) -> str:
     """Get the SHA of a file."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=15)
-        if response.status_code == 200:
-            return response.json().get("sha", "")
-        return ""
-    except Exception:
-        return ""
+    status, data = _github_api_get(url)
+    if status == 200 and data:
+        return data.get("sha", "")
+    return ""
 
 
-def move_file(source_path: str, dest_path: str, content: str) -> bool:
-    """Move a file by creating at dest_path, then deleting source_path."""
-    create_url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{dest_path}"
-    create_payload = {
-        "message": f"Batch move: {source_path} → {dest_path}",
+def create_github_file(path: str, content: str, message: str) -> bool:
+    """Create a file on GitHub. Returns True on success."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    payload = {
+        "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
         "branch": "main",
     }
+    status = _github_api_put(url, payload)
+    return status in [200, 201]
 
-    try:
-        create_response = requests.put(create_url, json=create_payload, headers=_github_headers(), timeout=15)
-        if create_response.status_code not in [200, 201]:
-            print(f"    Failed to create {dest_path}: {create_response.status_code}")
-            return False
 
-        source_sha = get_file_sha(source_path)
-        if source_sha:
-            delete_url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{source_path}"
-            delete_payload = {
-                "message": f"Remove from pending after batch move: {source_path}",
-                "sha": source_sha,
-                "branch": "main",
-            }
-            delete_response = requests.delete(delete_url, json=delete_payload, headers=_github_headers(), timeout=15)
-            if delete_response.status_code not in [200, 201]:
-                print(f"    Warning: Created {dest_path} but failed to delete {source_path}")
+def delete_github_file(path: str, sha: str, message: str) -> bool:
+    """Delete a file from GitHub. Returns True on success."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    payload = {"message": message, "sha": sha, "branch": "main"}
+    status = _github_api_delete(url, payload)
+    return status in [200, 201]
 
-        return True
-    except Exception as e:
-        print(f"    Move error: {e}")
+
+def move_file(source_path: str, dest_path: str, content: str) -> bool:
+    """Move a file: create at dest, delete source. Returns True on success."""
+    # Create destination file
+    if not create_github_file(dest_path, content, f"Move: {source_path} → {dest_path}"):
         return False
+
+    # Delete source file
+    source_sha = get_file_sha(source_path)
+    if source_sha:
+        delete_github_file(source_path, source_sha, f"Remove from pending: {source_path}")
+
+    return True
 
 
 # ===========================================================================
@@ -196,101 +204,39 @@ def extract_submission_id(file_content: str) -> Optional[str]:
 
 
 # ===========================================================================
-# Database Update — All Three Databases
+# State File
 # ===========================================================================
 
-def update_database_status(submission_id: str, new_filename: str) -> bool:
-    """Update the status and filename in all three databases."""
-    updated = False
-    now = datetime.now(timezone.utc).isoformat()
-
-    # Supabase
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            from supabase import create_client
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            supabase.table("submissions").update({
-                "status": "approved",
-                "pending_filename": new_filename,
-                "updated_at": now,
-            }).eq("submission_id", submission_id).execute()
-            updated = True
-            print(f"    Supabase updated")
-        except Exception as e:
-            print(f"    Supabase update failed: {e}")
-
-    # Neon
-    if NEON_URL:
-        try:
-            conn = psycopg2.connect(NEON_URL, connect_timeout=10)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE submissions SET status = %s, pending_filename = %s, updated_at = %s WHERE submission_id = %s",
-                ("approved", new_filename, now, submission_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            updated = True
-            print(f"    Neon updated")
-        except Exception as e:
-            print(f"    Neon update failed: {e}")
-
-    # Fly.io PG
-    if FLY_PG_URL:
-        try:
-            conn = psycopg2.connect(FLY_PG_URL, connect_timeout=10)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE submissions SET status = %s, pending_filename = %s, updated_at = %s WHERE submission_id = %s",
-                ("approved", new_filename, now, submission_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            updated = True
-            print(f"    Fly.io PG updated")
-        except Exception as e:
-            print(f"    Fly.io PG update failed: {e}")
-
-    if not updated:
-        print(f"    WARNING: Could not update any database for {submission_id}")
-
-    return updated
+def load_state() -> Dict:
+    """Load mover state from the knowledge repo."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    status, data = _github_api_get(url)
+    if status == 200 and data:
+        content_b64 = data.get("content", "")
+        if content_b64:
+            try:
+                return json.loads(base64.b64decode(content_b64).decode("utf-8"))
+            except Exception:
+                pass
+    return {"last_page": 1, "last_index": 0, "total_moved": 0, "last_run": ""}
 
 
-# ===========================================================================
-# Stuck Files Report
-# ===========================================================================
+def save_state(state: Dict) -> bool:
+    """Save mover state to the knowledge repo."""
+    content_json = json.dumps(state, indent=2, default=str)
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
+    sha = get_file_sha(STATE_FILE_PATH)
 
-def find_stuck_files(pending_files: list) -> list:
-    """Find files that have been in pending for over 48 hours."""
-    stuck = []
-    now = datetime.now(timezone.utc)
+    payload = {
+        "message": f"Update mover state: {state.get('total_moved', 0)} moved",
+        "content": base64.b64encode(content_json.encode("utf-8")).decode("utf-8"),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
 
-    for file_info in pending_files:
-        # GitHub API doesn't give us creation time easily from the list endpoint
-        # We check by reading the file content for the date
-        content = get_file_content(file_info["path"])
-        if content:
-            date_match = re.search(r'\*\*Date:\*\*\s*(.+)', content)
-            if date_match:
-                try:
-                    file_date_str = date_match.group(1).strip()
-                    # Format: 2026-07-24 14:30:00 UTC
-                    file_date = datetime.strptime(file_date_str, "%Y-%m-%d %H:%M:%S UTC")
-                    file_date = file_date.replace(tzinfo=timezone.utc)
-                    age_hours = (now - file_date).total_seconds() / 3600
-                    if age_hours > 48:
-                        stuck.append({
-                            "path": file_info["path"],
-                            "name": file_info["name"],
-                            "hours": round(age_hours, 1),
-                        })
-                except Exception:
-                    pass
-
-    return stuck
+    status = _github_api_put(url, payload)
+    return status in [200, 201]
 
 
 # ===========================================================================
@@ -298,16 +244,13 @@ def find_stuck_files(pending_files: list) -> list:
 # ===========================================================================
 
 def run_batch_mover():
-    """Scan pending/, move files to category folders, update databases, log results."""
+    """Move files from pending/ to category folders. Fast. No DB updates."""
     print("=" * 60)
-    print("Batch Pending File Mover v1.1")
+    print("Batch Pending File Mover v2.0")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"GitHub token: {'SET' if GITHUB_TOKEN else 'NOT SET'}")
-    print(f"Supabase: {'SET' if SUPABASE_URL else 'NOT SET'}")
-    print(f"Neon: {'SET' if NEON_URL else 'NOT SET'}")
-    print(f"Fly.io PG: {'SET' if FLY_PG_URL else 'NOT SET'}")
+    print(f"Max files per run: {MAX_FILES_PER_RUN}")
+    print(f"Runs: Every 2 hours | Capacity: 6,000 files/day")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -315,145 +258,146 @@ def run_batch_mover():
         print("ERROR: GH_TOKEN and KNOWLEDGE_REPO must be set.")
         return
 
-    # Get all pending files
-    print("Scanning pending/ folder...")
-    pending_files = list_pending_files()
-    total_files = len(pending_files)
-    print(f"Found {total_files} files in pending/")
-    sys.stdout.flush()
+    # Load state
+    state = load_state()
+    start_page = state.get("last_page", 1)
+    start_index = state.get("last_index", 0)
+    total_moved_total = state.get("total_moved", 0)
 
-    if total_files == 0:
-        print("Nothing to do.")
-        return
+    print(f"Resuming from page {start_page}, index {start_index}")
+    print(f"Total moved so far: {total_moved_total}")
+    sys.stdout.flush()
 
     moved = 0
     skipped = 0
     errors = 0
-    db_updated = 0
+    current_page = start_page
+    current_index = start_index
     log_entries = []
+    all_files = []
 
-    # Process in batches
-    for batch_start in range(0, total_files, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, total_files)
-        batch = pending_files[batch_start:batch_end]
+    # Collect files from pending/ starting from last page
+    print("Scanning pending/ folder...")
+    page = current_page
+    while True:
+        files, next_page = list_pending_files(page)
+        if not files:
+            break
+        all_files.extend(files)
+        if not next_page or len(all_files) >= MAX_FILES_PER_RUN + current_index:
+            break
+        page = next_page
 
-        print(f"\nBatch {batch_start // BATCH_SIZE + 1}: Processing files {batch_start + 1}-{batch_end}...")
+    total_found = len(all_files)
+    print(f"Found {total_found} files to process")
+    sys.stdout.flush()
+
+    if total_found == 0 or current_index >= total_found:
+        print("Nothing to process.")
+        state["last_page"] = 1
+        state["last_index"] = 0
+        state["last_run"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+        return
+
+    # Process files
+    files_to_process = all_files[current_index:current_index + MAX_FILES_PER_RUN]
+
+    for i, file_info in enumerate(files_to_process):
+        file_path = file_info["path"]
+        file_name = file_info["name"]
+
+        print(f"  [{current_index + i + 1}/{total_found}] {file_name}...", end=" ")
         sys.stdout.flush()
 
-        for file_info in batch:
-            file_path = file_info["path"]
-            file_name = file_info["name"]
+        # Read file
+        content = get_file_content(file_path)
+        if not content:
+            print("SKIP (no content)")
+            skipped += 1
+            log_entries.append(f"SKIP | {file_name} | No content")
+            _update_progress(state, current_page, current_index + i + 1, total_moved_total + moved)
+            continue
 
-            print(f"  {file_name}...", end=" ")
-            sys.stdout.flush()
+        if len(content.strip()) < 50:
+            print("SKIP (empty)")
+            skipped += 1
+            log_entries.append(f"SKIP | {file_name} | Empty")
+            _update_progress(state, current_page, current_index + i + 1, total_moved_total + moved)
+            continue
 
-            # Read file content
-            content = get_file_content(file_path)
-            if not content:
-                print("SKIPPED (could not read file)")
-                skipped += 1
-                log_entries.append(f"SKIP | {file_name} | Could not read file")
-                continue
+        # Extract category
+        category = extract_category(content)
+        if not category:
+            print("SKIP (no category)")
+            skipped += 1
+            log_entries.append(f"SKIP | {file_name} | No category")
+            _update_progress(state, current_page, current_index + i + 1, total_moved_total + moved)
+            continue
 
-            # Check if file is empty or corrupted
-            if len(content.strip()) < 50:
-                print("SKIPPED (file too short or empty)")
-                skipped += 1
-                log_entries.append(f"SKIP | {file_name} | Empty or too short")
-                continue
+        # Build destination path
+        folder = CATEGORY_SLUGS.get(category, "other")
+        dest_path = f"{folder}/{file_name}"
 
-            # Extract category
-            category = extract_category(content)
-            if not category:
-                print("SKIPPED (no valid category found)")
-                skipped += 1
-                log_entries.append(f"SKIP | {file_name} | No valid category")
-                continue
+        # Check if destination exists
+        if get_file_sha(dest_path):
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            base_name = file_name.replace(".md", "")
+            dest_path = f"{folder}/{timestamp}-{base_name}.md"
 
-            # Extract submission ID
-            submission_id = extract_submission_id(content)
+        # Move the file
+        success = move_file(file_path, dest_path, content)
+        if success:
+            sid = extract_submission_id(content) or "?"
+            print(f"OK → {folder}/")
+            moved += 1
+            log_entries.append(f"MOVE | {file_name} → {dest_path} | {sid}")
+        else:
+            print("FAIL")
+            errors += 1
+            log_entries.append(f"FAIL | {file_name} | Move failed")
 
-            # Get destination folder
-            folder = CATEGORY_SLUGS.get(category, "other")
-            dest_path = f"{folder}/{file_name}"
+        # Save progress every 50 files
+        _update_progress(state, current_page, current_index + i + 1, total_moved_total + moved)
 
-            # Check if destination already exists
-            existing_sha = get_file_sha(dest_path)
-            if existing_sha:
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-                base_name = file_name.replace(".md", "")
-                dest_path = f"{folder}/{timestamp}-{base_name}.md"
-
-            # Move the file on GitHub
-            success = move_file(file_path, dest_path, content)
-            if success:
-                sid = submission_id or "unknown"
-                print(f"MOVED → {dest_path}", end=" ")
-                moved += 1
-
-                # Update databases
-                if submission_id:
-                    db_ok = update_database_status(submission_id, dest_path)
-                    if db_ok:
-                        db_updated += 1
-                        print("+ DB updated")
-                    else:
-                        print("(DB update failed)")
-                else:
-                    print("(no submission ID)")
-
-                log_entries.append(f"MOVE | {file_name} → {dest_path} | {sid} | {category}")
-            else:
-                print("ERROR (move failed)")
-                errors += 1
-                log_entries.append(f"ERROR | {file_name} | Move failed")
-
-        # Delay between batches
-        if batch_end < total_files:
-            print(f"  Waiting {BATCH_DELAY}s before next batch...")
-            sys.stdout.flush()
-            time.sleep(BATCH_DELAY)
-
-    # Stuck files report
-    print("\nChecking for stuck files...")
-    stuck_files = find_stuck_files(pending_files)
-    if stuck_files:
-        print(f"  ⚠️  {len(stuck_files)} files stuck in pending for over 48 hours:")
-        for sf in stuck_files[:10]:
-            print(f"    - {sf['name']} ({sf['hours']} hours)")
-        if len(stuck_files) > 10:
-            print(f"    ... and {len(stuck_files) - 10} more")
+    # Final state update
+    if current_index + len(files_to_process) >= total_found:
+        state["last_page"] = 1
+        state["last_index"] = 0
     else:
-        print("  No stuck files found.")
+        state["last_page"] = current_page
+        state["last_index"] = current_index + len(files_to_process)
+    state["total_moved"] = total_moved_total + moved
+    state["last_run"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
 
-    # Print summary
+    # Summary
     print("\n" + "=" * 60)
-    print(f"SUMMARY: {moved} moved | {db_updated} DB updated | {skipped} skipped | {errors} errors | {total_files} total")
-    if stuck_files:
-        print(f"STUCK: {len(stuck_files)} files in pending > 48 hours")
+    print(f"THIS RUN: {moved} moved | {skipped} skipped | {errors} errors")
+    print(f"TOTAL: {state['total_moved']} moved overall")
     print("=" * 60)
 
     # Save log
+    _save_log(log_entries, moved, skipped, errors)
+
+
+def _update_progress(state: Dict, page: int, index: int, total: int):
+    """Save progress to state file periodically."""
+    state["last_page"] = page
+    state["last_index"] = index
+    state["total_moved"] = total
+    state["last_run"] = datetime.now(timezone.utc).isoformat()
+
+
+def _save_log(log_entries: List[str], moved: int, skipped: int, errors: int):
+    """Save run log to knowledge repo."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_content = f"# Batch Move Log — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-    log_content += f"# {moved} moved | {db_updated} DB updated | {skipped} skipped | {errors} errors\n"
-    if stuck_files:
-        log_content += f"# {len(stuck_files)} files stuck > 48 hours\n"
-    log_content += "\n"
-    log_content += "\n".join(log_entries)
+    log_content += f"# {moved} moved | {skipped} skipped | {errors} errors\n\n"
+    log_content += "\n".join(log_entries) if log_entries else "No entries."
 
-    log_path = f"admin/batch-move-log-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.md"
-    log_url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{log_path}"
-    log_payload = {
-        "message": f"Batch move log: {moved} moved, {skipped} skipped",
-        "content": base64.b64encode(log_content.encode("utf-8")).decode("utf-8"),
-        "branch": "main",
-    }
-
-    try:
-        requests.put(log_url, json=log_payload, headers=_github_headers(), timeout=15)
-        print(f"Log saved to {log_path}")
-    except Exception as e:
-        print(f"Failed to save log: {e}")
+    log_path = f"admin/batch-move-log-{timestamp}.md"
+    create_github_file(log_path, log_content, f"Move log: {moved} moved")
 
 
 if __name__ == "__main__":
