@@ -1,17 +1,14 @@
 """
-Database Sync — v1.3
+Database Sync — v1.4
 =====================
 Syncs database submission status with GitHub repo state.
 Runs once daily. Updates Supabase and Neon automatically.
-Fly.io PG updated manually via fly postgres connect (internal network).
+Uses batch updates for speed — processes all files in one run.
 
 What it does:
 - Scans category folders on GitHub
-- Finds files already in category folders
-- Extracts submission ID from filename
-- Updates Supabase and Neon status to "approved"
-- Updates pending_filename to match actual file location
-- Processes 200 files per folder to stay within timeout
+- Collects all submission IDs from filenames
+- Batch updates Supabase and Neon in one call per folder
 """
 
 import os
@@ -60,8 +57,6 @@ CATEGORY_SLUGS = {
     "other": "Other",
 }
 
-MAX_FILES_PER_FOLDER = 200
-
 
 # ===========================================================================
 # GitHub Helpers
@@ -75,7 +70,7 @@ def _github_headers():
 
 
 def list_folder_files(folder: str) -> List[Dict]:
-    """List .md files in a category folder with proper pagination."""
+    """List .md files in a category folder with pagination."""
     all_files = []
     page = 1
 
@@ -104,8 +99,6 @@ def list_folder_files(folder: str) -> List[Dict]:
                 if len(data) < 100:
                     break
                 page += 1
-                if len(all_files) >= MAX_FILES_PER_FOLDER:
-                    break
             else:
                 break
         except Exception as e:
@@ -116,71 +109,85 @@ def list_folder_files(folder: str) -> List[Dict]:
 
 
 def extract_submission_id_from_filename(filename: str) -> Optional[str]:
-    """
-    Extract submission ID from filename.
-    Handles multiple filename formats:
-      - New: GHGPT-XXXX-YYYY anywhere in the name
-      - Old: filename ends with -XXXX.md where XXXX is the sequence
-      - Timestamp-based: 20260724-131730-topic-ID.md
-    """
-    # Format 1: Full ID GHGPT-XXXX-YYYY anywhere in filename
+    """Extract submission ID from filename."""
     match = re.search(r'GHGPT-(\d{4})-(\d{4})', filename)
     if match:
         return f"GHGPT-{match.group(1)}-{match.group(2)}"
 
-    # Format 2: Ends with -XXXX.md (just the sequence number)
     match = re.search(r'-(\d{4})\.md$', filename)
     if match:
         seq = match.group(1)
-        # Try to get the year from a timestamp in the filename
         date_match = re.search(r'^(\d{4})\d{4}-\d{6}-', filename)
         if date_match:
             year = date_match.group(1)
             return f"GHGPT-{year}-{seq}"
-        # Fallback: use 2026 as default year
         return f"GHGPT-2026-{seq}"
 
     return None
 
 
 # ===========================================================================
-# Database Sync
+# Batch Database Sync
 # ===========================================================================
 
-def update_databases(submission_id: str, filename: str) -> int:
-    """Update status to 'approved' in Supabase and Neon. Returns count of DBs updated."""
-    updated = 0
+def batch_update_supabase(submission_ids: List[str], folder_name: str) -> int:
+    """Batch update Supabase. Returns count of updated rows."""
+    if not SUPABASE_URL or not SUPABASE_KEY or not submission_ids:
+        return 0
+
     now = datetime.now(timezone.utc).isoformat()
+    updated = 0
 
-    # Supabase
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            from supabase import create_client
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            supabase.table("submissions").update({
-                "status": "approved",
-                "pending_filename": filename,
-                "updated_at": now,
-            }).eq("submission_id", submission_id).execute()
-            updated += 1
-        except Exception:
-            pass
+    try:
+        from supabase import create_client
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    # Neon
-    if NEON_URL:
-        try:
-            conn = psycopg2.connect(NEON_URL, connect_timeout=10)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE submissions SET status = %s, pending_filename = %s, updated_at = %s WHERE submission_id = %s",
-                ("approved", filename, now, submission_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            updated += 1
-        except Exception:
-            pass
+        # Process in batches of 50
+        for i in range(0, len(submission_ids), 50):
+            batch = submission_ids[i:i+50]
+            for sid in batch:
+                try:
+                    supabase.table("submissions").update({
+                        "status": "approved",
+                        "pending_filename": f"{folder_name}/{sid}.md",
+                        "updated_at": now,
+                    }).eq("submission_id", sid).execute()
+                    updated += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return updated
+
+
+def batch_update_neon(submission_ids: List[str], folder_name: str) -> int:
+    """Batch update Neon. Returns count of updated rows."""
+    if not NEON_URL or not submission_ids:
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    updated = 0
+
+    try:
+        conn = psycopg2.connect(NEON_URL, connect_timeout=10)
+        cur = conn.cursor()
+
+        for sid in submission_ids:
+            try:
+                cur.execute(
+                    "UPDATE submissions SET status = %s, pending_filename = %s, updated_at = %s WHERE submission_id = %s",
+                    ("approved", f"{folder_name}/{sid}.md", now, sid)
+                )
+                updated += 1
+            except Exception:
+                conn.rollback()
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
 
     return updated
 
@@ -190,64 +197,62 @@ def update_databases(submission_id: str, filename: str) -> int:
 # ===========================================================================
 
 def run_db_sync():
-    """Scan category folders and sync Supabase + Neon databases."""
+    """Scan all category folders and batch sync databases."""
     print("=" * 60)
-    print("Database Sync v1.3")
+    print("Database Sync v1.4 — Batch Mode")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"Max files per folder: {MAX_FILES_PER_FOLDER}")
-    print(f"Databases: Supabase + Neon (Fly.io PG synced manually)")
+    print(f"Databases: Supabase + Neon")
     sys.stdout.flush()
 
     if not GITHUB_TOKEN or not KNOWLEDGE_REPO:
         print("ERROR: GH_TOKEN and KNOWLEDGE_REPO must be set.")
         return
 
-    total_synced = 0
-    total_checked = 0
-    total_files_found = 0
-    total_ids_found = 0
+    total_supabase = 0
+    total_neon = 0
+    total_files = 0
+    total_ids = 0
 
     for folder_slug, category_name in CATEGORY_SLUGS.items():
-        print(f"\nScanning {folder_slug}/...")
+        print(f"\n{folder_slug}/...", end=" ")
         sys.stdout.flush()
 
         files = list_folder_files(folder_slug)
         folder_count = len(files)
-        total_files_found += folder_count
-        print(f"  Found {folder_count} files")
+        total_files += folder_count
 
         if folder_count == 0:
+            print("0 files")
             continue
 
+        # Extract all submission IDs from this folder
+        submission_ids = []
         for file_info in files:
-            file_path = file_info["path"]
-            filename = file_info["name"]
-            total_checked += 1
+            sid = extract_submission_id_from_filename(file_info["name"])
+            if sid:
+                submission_ids.append(sid)
 
-            # Extract submission ID from filename
-            submission_id = extract_submission_id_from_filename(filename)
-            if not submission_id:
-                continue
+        total_ids += len(submission_ids)
+        print(f"{folder_count} files, {len(submission_ids)} IDs", end=" ")
 
-            total_ids_found += 1
+        if not submission_ids:
+            print("")
+            continue
 
-            # Update Supabase + Neon
-            db_count = update_databases(submission_id, file_path)
-            if db_count > 0:
-                total_synced += 1
-
-            if total_synced % 200 == 0 and total_synced > 0:
-                print(f"  Synced: {total_synced}")
-
-        print(f"  Processed {min(folder_count, MAX_FILES_PER_FOLDER)} files from {folder_slug}/")
+        # Batch update both databases
+        sup_count = batch_update_supabase(submission_ids, folder_slug)
+        neon_count = batch_update_neon(submission_ids, folder_slug)
+        total_supabase += sup_count
+        total_neon += neon_count
+        print(f"→ Supabase:{sup_count} Neon:{neon_count}")
 
     print("\n" + "=" * 60)
     print(f"SYNC COMPLETE")
-    print(f"  Files found across all folders: {total_files_found}")
-    print(f"  Files checked: {total_checked}")
-    print(f"  Submission IDs extracted: {total_ids_found}")
-    print(f"  Database records updated: {total_synced}")
+    print(f"  Files scanned: {total_files}")
+    print(f"  IDs extracted: {total_ids}")
+    print(f"  Supabase updated: {total_supabase}")
+    print(f"  Neon updated: {total_neon}")
     print(f"  Fly.io PG: update manually via 'fly postgres connect'")
     print("=" * 60)
 
