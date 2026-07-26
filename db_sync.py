@@ -1,16 +1,15 @@
 """
-Database Sync — v1.1
+Database Sync — v1.2
 =====================
 Syncs database submission status with GitHub repo state.
-Runs once daily.
+Runs once daily. Updates Supabase and Neon automatically.
+Fly.io PG updated manually via fly postgres connect (internal network).
 
 What it does:
 - Scans category folders on GitHub
-- Finds files that are in database as "queued" but already in category folders
-- Updates database status to "approved" for those files
+- Finds files already in category folders
+- Updates Supabase and Neon status to "approved"
 - Updates pending_filename to match actual file location
-
-Fixed: GitHub API pagination now handled correctly.
 """
 
 import os
@@ -35,7 +34,6 @@ GITHUB_API = "https://api.github.com"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 NEON_URL = os.getenv("NEON_URL", "")
-FLY_PG_URL = os.getenv("FLY_PG_URL", "")
 
 CATEGORY_SLUGS = {
     "agriculture_farming": "Agriculture & Farming",
@@ -73,10 +71,7 @@ def _github_headers():
 
 
 def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
-    """
-    List .md files in a category folder with proper pagination.
-    Returns list of file info dicts.
-    """
+    """List .md files in a category folder with proper pagination."""
     all_files = []
     page = 1
 
@@ -91,36 +86,24 @@ def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
 
             data = response.json()
 
-            # If data is a dict instead of list, it's a single file, not a folder
             if isinstance(data, dict):
                 if data.get("name", "").endswith(".md"):
                     all_files.append(data)
                 break
 
-            # If data is a list, process each item
             if isinstance(data, list):
                 if len(data) == 0:
                     break
-
                 for item in data:
-                    if item.get("name", "").endswith(".md"):
-                        # Skip .gitkeep files
-                        if item["name"] == ".gitkeep":
-                            continue
+                    if item.get("name", "").endswith(".md") and item["name"] != ".gitkeep":
                         all_files.append(item)
-
-                # If we got fewer than requested, we're done
                 if len(data) < 100:
                     break
-
                 page += 1
-
-                # Safety limit
                 if len(all_files) >= max_files:
                     break
             else:
                 break
-
         except Exception as e:
             print(f"    Error listing {folder}: {e}")
             break
@@ -128,24 +111,9 @@ def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
     return all_files
 
 
-def get_file_content(path: str) -> Optional[str]:
-    """Get file content and return decoded text."""
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            content_b64 = data.get("content", "")
-            if content_b64:
-                return base64.b64decode(content_b64).decode("utf-8", errors="ignore")
-        return None
-    except Exception:
-        return None
-
-
-def extract_submission_id(content: str) -> Optional[str]:
-    """Extract submission ID from file content."""
-    match = re.search(r'\*\*Submission ID:\*\*\s*(GHGPT-\d{4}-\d{4})', content)
+def extract_submission_id_from_filename(filename: str) -> Optional[str]:
+    """Extract submission ID from filename."""
+    match = re.search(r'(GHGPT-\d{4}-\d{4})', filename)
     if match:
         return match.group(1)
     return None
@@ -155,8 +123,8 @@ def extract_submission_id(content: str) -> Optional[str]:
 # Database Sync
 # ===========================================================================
 
-def update_database(submission_id: str, filename: str) -> int:
-    """Update status to 'approved' in all databases. Returns count of DBs updated."""
+def update_databases(submission_id: str, filename: str) -> int:
+    """Update status to 'approved' in Supabase and Neon. Returns count of DBs updated."""
     updated = 0
     now = datetime.now(timezone.utc).isoformat()
 
@@ -171,8 +139,8 @@ def update_database(submission_id: str, filename: str) -> int:
                 "updated_at": now,
             }).eq("submission_id", submission_id).execute()
             updated += 1
-        except Exception as e:
-            print(f"    Supabase error for {submission_id}: {e}")
+        except Exception:
+            pass
 
     # Neon
     if NEON_URL:
@@ -187,24 +155,8 @@ def update_database(submission_id: str, filename: str) -> int:
             cur.close()
             conn.close()
             updated += 1
-        except Exception as e:
-            print(f"    Neon error for {submission_id}: {e}")
-
-    # Fly.io PG
-    if FLY_PG_URL:
-        try:
-            conn = psycopg2.connect(FLY_PG_URL, connect_timeout=10)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE submissions SET status = %s, pending_filename = %s, updated_at = %s WHERE submission_id = %s",
-                ("approved", filename, now, submission_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            updated += 1
-        except Exception as e:
-            print(f"    Fly.io PG error for {submission_id}: {e}")
+        except Exception:
+            pass
 
     return updated
 
@@ -214,12 +166,12 @@ def update_database(submission_id: str, filename: str) -> int:
 # ===========================================================================
 
 def run_db_sync():
-    """Scan category folders and sync database status."""
+    """Scan category folders and sync Supabase + Neon databases."""
     print("=" * 60)
-    print("Database Sync v1.1")
+    print("Database Sync v1.2")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"Databases: {'Supabase' if SUPABASE_URL else '?'}, {'Neon' if NEON_URL else '?'}, {'FlyPG' if FLY_PG_URL else '?'}")
+    print(f"Databases: Supabase + Neon (Fly.io PG synced manually)")
     sys.stdout.flush()
 
     if not GITHUB_TOKEN or not KNOWLEDGE_REPO:
@@ -234,7 +186,7 @@ def run_db_sync():
         print(f"\nScanning {folder_slug}/...")
         sys.stdout.flush()
 
-        files = list_folder_files(folder_slug, max_files=500)
+        files = list_folder_files(folder_slug, max_files=300)
         folder_count = len(files)
         total_files_found += folder_count
         print(f"  Found {folder_count} files")
@@ -242,47 +194,30 @@ def run_db_sync():
         if folder_count == 0:
             continue
 
-        # Process a sample from each folder
-        sample_size = min(folder_count, 200)
-        sample = files[:sample_size]
-
-        for file_info in sample:
+        for file_info in files:
             file_path = file_info["path"]
+            filename = file_info["name"]
             total_checked += 1
 
-            # Skip reading file content — extract submission ID from filename
-            # The filename format is: YYYYMMDD-HHMMSS-topic-SUBID.md or topic-SUBID.md
-            filename = file_info["name"]
-            id_match = re.search(r'(GHGPT-\d{4}-\d{4})', filename)
-            if not id_match:
-                # Try reading the file for the ID
-                content = get_file_content(file_path)
-                if content:
-                    id_match = re.search(r'\*\*Submission ID:\*\*\s*(GHGPT-\d{4}-\d{4})', content)
-                    if id_match:
-                        submission_id = id_match.group(1)
-                    else:
-                        continue
-                else:
-                    continue
-            else:
-                submission_id = id_match.group(1)
+            # Extract submission ID from filename
+            submission_id = extract_submission_id_from_filename(filename)
+            if not submission_id:
+                continue
 
-            # Update database
-            db_count = update_database(submission_id, file_path)
+            # Update Supabase + Neon
+            db_count = update_databases(submission_id, file_path)
             if db_count > 0:
                 total_synced += 1
 
             if total_synced % 100 == 0 and total_synced > 0:
                 print(f"  Synced: {total_synced}")
 
-        print(f"  Processed {sample_size} files from {folder_slug}/")
-
     print("\n" + "=" * 60)
     print(f"SYNC COMPLETE")
     print(f"  Files found across all folders: {total_files_found}")
     print(f"  Files checked: {total_checked}")
     print(f"  Database records updated: {total_synced}")
+    print(f"  Fly.io PG: update manually via 'fly postgres connect'")
     print("=" * 60)
 
 
