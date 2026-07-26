@@ -1,5 +1,5 @@
 """
-Database Sync — v1.2
+Database Sync — v1.3
 =====================
 Syncs database submission status with GitHub repo state.
 Runs once daily. Updates Supabase and Neon automatically.
@@ -8,6 +8,7 @@ Fly.io PG updated manually via fly postgres connect (internal network).
 What it does:
 - Scans category folders on GitHub
 - Finds files already in category folders
+- Extracts submission ID from filename
 - Updates Supabase and Neon status to "approved"
 - Updates pending_filename to match actual file location
 """
@@ -112,10 +113,30 @@ def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
 
 
 def extract_submission_id_from_filename(filename: str) -> Optional[str]:
-    """Extract submission ID from filename."""
-    match = re.search(r'(GHGPT-\d{4}-\d{4})', filename)
+    """
+    Extract submission ID from filename.
+    Handles multiple filename formats:
+      - New: GHGPT-XXXX-YYYY anywhere in the name
+      - Old: filename ends with -XXXX.md where XXXX is the sequence
+      - Timestamp-based: 20260724-131730-topic-ID.md
+    """
+    # Format 1: Full ID GHGPT-XXXX-YYYY anywhere in filename
+    match = re.search(r'GHGPT-(\d{4})-(\d{4})', filename)
     if match:
-        return match.group(1)
+        return f"GHGPT-{match.group(1)}-{match.group(2)}"
+
+    # Format 2: Ends with -XXXX.md (just the sequence number)
+    match = re.search(r'-(\d{4})\.md$', filename)
+    if match:
+        seq = match.group(1)
+        # Try to get the year from a timestamp in the filename
+        date_match = re.search(r'^(\d{4})\d{4}-\d{6}-', filename)
+        if date_match:
+            year = date_match.group(1)
+            return f"GHGPT-{year}-{seq}"
+        # Fallback: use 2026 as default year
+        return f"GHGPT-2026-{seq}"
+
     return None
 
 
@@ -168,7 +189,7 @@ def update_databases(submission_id: str, filename: str) -> int:
 def run_db_sync():
     """Scan category folders and sync Supabase + Neon databases."""
     print("=" * 60)
-    print("Database Sync v1.2")
+    print("Database Sync v1.3")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"Databases: Supabase + Neon (Fly.io PG synced manually)")
@@ -181,12 +202,13 @@ def run_db_sync():
     total_synced = 0
     total_checked = 0
     total_files_found = 0
+    total_ids_found = 0
 
     for folder_slug, category_name in CATEGORY_SLUGS.items():
         print(f"\nScanning {folder_slug}/...")
         sys.stdout.flush()
 
-        files = list_folder_files(folder_slug, max_files=300)
+        files = list_folder_files(folder_slug, max_files=500)
         folder_count = len(files)
         total_files_found += folder_count
         print(f"  Found {folder_count} files")
@@ -204,18 +226,21 @@ def run_db_sync():
             if not submission_id:
                 continue
 
+            total_ids_found += 1
+
             # Update Supabase + Neon
             db_count = update_databases(submission_id, file_path)
             if db_count > 0:
                 total_synced += 1
 
-            if total_synced % 100 == 0 and total_synced > 0:
+            if total_synced % 200 == 0 and total_synced > 0:
                 print(f"  Synced: {total_synced}")
 
     print("\n" + "=" * 60)
     print(f"SYNC COMPLETE")
     print(f"  Files found across all folders: {total_files_found}")
     print(f"  Files checked: {total_checked}")
+    print(f"  Submission IDs extracted: {total_ids_found}")
     print(f"  Database records updated: {total_synced}")
     print(f"  Fly.io PG: update manually via 'fly postgres connect'")
     print("=" * 60)
