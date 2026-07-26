@@ -11,6 +11,7 @@ What it does:
 - Extracts submission ID from filename
 - Updates Supabase and Neon status to "approved"
 - Updates pending_filename to match actual file location
+- Processes 200 files per folder to stay within timeout
 """
 
 import os
@@ -59,6 +60,8 @@ CATEGORY_SLUGS = {
     "other": "Other",
 }
 
+MAX_FILES_PER_FOLDER = 200
+
 
 # ===========================================================================
 # GitHub Helpers
@@ -71,7 +74,7 @@ def _github_headers():
     }
 
 
-def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
+def list_folder_files(folder: str) -> List[Dict]:
     """List .md files in a category folder with proper pagination."""
     all_files = []
     page = 1
@@ -101,7 +104,7 @@ def list_folder_files(folder: str, max_files: int = 500) -> List[Dict]:
                 if len(data) < 100:
                     break
                 page += 1
-                if len(all_files) >= max_files:
+                if len(all_files) >= MAX_FILES_PER_FOLDER:
                     break
             else:
                 break
@@ -192,6 +195,7 @@ def run_db_sync():
     print("Database Sync v1.3")
     print("=" * 60)
     print(f"Repo: {KNOWLEDGE_REPO}")
+    print(f"Max files per folder: {MAX_FILES_PER_FOLDER}")
     print(f"Databases: Supabase + Neon (Fly.io PG synced manually)")
     sys.stdout.flush()
 
@@ -208,7 +212,7 @@ def run_db_sync():
         print(f"\nScanning {folder_slug}/...")
         sys.stdout.flush()
 
-        files = list_folder_files(folder_slug, max_files=500)
+        files = list_folder_files(folder_slug)
         folder_count = len(files)
         total_files_found += folder_count
         print(f"  Found {folder_count} files")
@@ -235,6 +239,8 @@ def run_db_sync():
 
             if total_synced % 200 == 0 and total_synced > 0:
                 print(f"  Synced: {total_synced}")
+
+        print(f"  Processed {min(folder_count, MAX_FILES_PER_FOLDER)} files from {folder_slug}/")
 
     print("\n" + "=" * 60)
     print(f"SYNC COMPLETE")
