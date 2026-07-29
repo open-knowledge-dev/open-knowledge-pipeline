@@ -1,17 +1,14 @@
 """
-FAO Safety-Net Rewriter — v1.0
+FAO Safety-Net Rewriter — v1.1
 ================================
 Weekly scanner that detects and rewrites any FAO-referencing files
 in the Ghana-GPT knowledge base.
 
-- Scans all category folders for files with "FAO" in filename or body
-- Rewrites via Groq to remove all FAO/UN references
-- Renames files to remove "FAO" from filename
-- Updates all 3 databases
-- Runs as weekly GitHub Actions workflow (Sunday 4 AM)
-- Self-disabling: skips if no FAO files found for 4 consecutive weeks
-
-Legal basis: Facts are not copyrightable. Rewritten content is 100% original.
+Changes in v1.1:
+- Fixed: scan_for_fao_files() now correctly detects files
+- Added: debug logging for API calls
+- Changed: filename match alone triggers full rewrite (not just rename)
+- Added: progress output per folder
 """
 
 import os
@@ -40,15 +37,13 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 STATE_FILE_PATH = "admin/fao-rewriter-state.json"
 AUDIT_FILE_PATH = "admin/fao-rewrite-audit.md"
 REQUEST_TIMEOUT = 60
-MAX_FILES_PER_RUN = 10  # Conservative — runs weekly, not urgent
+MAX_FILES_PER_RUN = 10
 
-# Database URLs from environment
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 NEON_URL = os.getenv("NEON_URL", "")
 FLY_PG_URL = os.getenv("FLY_PG_URL", "")
 
-# FAO detection patterns
 FAO_FILENAME_PATTERN = re.compile(r'FAO|fao', re.IGNORECASE)
 FAO_CONTENT_PATTERNS = [
     re.compile(r'\bFAO\b'),
@@ -58,7 +53,6 @@ FAO_CONTENT_PATTERNS = [
     re.compile(r'(?:agriculture|farming|food|crop|livestock|fishery).*United Nations', re.IGNORECASE),
 ]
 
-# Category folder mapping
 CATEGORY_FOLDERS = [
     "agriculture_farming", "business_finance", "culture_traditions",
     "education_learning", "health_medicine", "technology_innovation",
@@ -68,10 +62,6 @@ CATEGORY_FOLDERS = [
     "governance_leadership", "family_relationships", "arts_crafts",
     "science_innovation", "other",
 ]
-
-# ===========================================================================
-# Rewrite Prompt
-# ===========================================================================
 
 REWRITE_SYSTEM_PROMPT = (
     "You are an agricultural expert from Ghana with decades of hands-on farming experience. "
@@ -107,7 +97,6 @@ def _github_headers() -> Dict[str, str]:
 
 
 def load_state() -> Dict:
-    """Load rewriter state from GitHub."""
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {"processed_files": [], "clean_weeks": 0, "total_rewritten": 0}
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{STATE_FILE_PATH}"
@@ -117,14 +106,17 @@ def load_state() -> Dict:
             content_b64 = response.json().get("content", "")
             if content_b64:
                 decoded = base64.b64decode(content_b64).decode("utf-8")
-                return json.loads(decoded)
+                state = json.loads(decoded)
+                state.setdefault("processed_files", [])
+                state.setdefault("clean_weeks", 0)
+                state.setdefault("total_rewritten", 0)
+                return state
     except Exception:
         pass
     return {"processed_files": [], "clean_weeks": 0, "total_rewritten": 0}
 
 
 def save_state(state: Dict) -> bool:
-    """Save rewriter state to GitHub."""
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
     content_json = json.dumps(state, indent=2, default=str)
@@ -151,11 +143,8 @@ def save_state(state: Dict) -> bool:
 
 
 def append_audit_log(entry: str) -> bool:
-    """Append an entry to the audit log."""
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return False
-    
-    # Get existing audit file
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{AUDIT_FILE_PATH}"
     sha = ""
     existing_content = ""
@@ -168,13 +157,9 @@ def append_audit_log(entry: str) -> bool:
                 existing_content = base64.b64decode(content_b64).decode("utf-8")
     except Exception:
         pass
-    
-    # Append new entry
     if not existing_content:
         existing_content = "# FAO Rewriter Audit Log\n\n"
-    
     new_content = existing_content + entry + "\n"
-    
     payload = {
         "message": f"Update FAO audit log — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         "content": base64.b64encode(new_content.encode("utf-8")).decode("utf-8"),
@@ -182,7 +167,6 @@ def append_audit_log(entry: str) -> bool:
     }
     if sha:
         payload["sha"] = sha
-    
     try:
         response = requests.put(url, json=payload, headers=_github_headers(), timeout=15)
         return response.status_code in [200, 201]
@@ -197,15 +181,20 @@ def get_file_content(path: str) -> Optional[Tuple[str, str]]:
         response = requests.get(url, headers=_github_headers(), timeout=15)
         if response.status_code == 200:
             data = response.json()
-            content = base64.b64decode(data.get("content", "")).decode("utf-8")
-            return content, data.get("sha", "")
-    except Exception:
-        pass
+            content_b64 = data.get("content", "")
+            if content_b64:
+                content = base64.b64decode(content_b64).decode("utf-8")
+                return content, data.get("sha", "")
+            else:
+                print(f"      [WARN] No content field for {path}")
+        else:
+            print(f"      [WARN] HTTP {response.status_code} for {path}")
+    except Exception as e:
+        print(f"      [WARN] Exception: {e} for {path}")
     return None
 
 
 def update_file(path: str, new_content: str, sha: str, commit_msg: str) -> bool:
-    """Update a file on GitHub."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     payload = {
         "message": commit_msg,
@@ -220,12 +209,26 @@ def update_file(path: str, new_content: str, sha: str, commit_msg: str) -> bool:
         return False
 
 
+def delete_file(path: str, sha: str, commit_msg: str) -> bool:
+    """Delete a file from GitHub."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    payload = {
+        "message": commit_msg,
+        "sha": sha,
+        "branch": "main",
+    }
+    try:
+        response = requests.delete(url, json=payload, headers=_github_headers(), timeout=15)
+        return response.status_code in [200, 201]
+    except Exception:
+        return False
+
+
 # ===========================================================================
 # FAO Detection
 # ===========================================================================
 
 def contains_fao_content(text: str) -> bool:
-    """Check if text contains any FAO-related references."""
     for pattern in FAO_CONTENT_PATTERNS:
         if pattern.search(text):
             return True
@@ -233,61 +236,84 @@ def contains_fao_content(text: str) -> bool:
 
 
 def has_fao_filename(filename: str) -> bool:
-    """Check if filename contains FAO reference."""
     return bool(FAO_FILENAME_PATTERN.search(filename))
 
 
 # ===========================================================================
-# File Scanning
+# File Scanning (FIXED)
 # ===========================================================================
 
 def scan_for_fao_files(state: Dict) -> List[Dict]:
-    """Scan all category folders for files with FAO references.
-    Returns list of {path, sha, has_fao_content, has_fao_filename}."""
+    """Scan all category folders for files with FAO references."""
     
     processed = set(state.get("processed_files", []))
     fao_files = []
     
     print(f"Scanning {len(CATEGORY_FOLDERS)} category folders...")
+    print(f"Repo: {KNOWLEDGE_REPO}")
     sys.stdout.flush()
     
     for folder in CATEGORY_FOLDERS:
         url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{folder}"
+        print(f"  Checking: {folder}/", end=" ")
+        sys.stdout.flush()
+        
         try:
             response = requests.get(url, headers=_github_headers(), timeout=15)
             if response.status_code != 200:
+                print(f"HTTP {response.status_code}")
+                sys.stdout.flush()
                 continue
             
             files = response.json()
             if not isinstance(files, list):
+                print(f"unexpected response type")
+                sys.stdout.flush()
                 continue
+            
+            print(f"{len(files)} files")
+            sys.stdout.flush()
             
             for file_info in files:
                 filepath = file_info.get("path", "")
-                filename = filepath.split("/")[-1]
+                filename = filepath.split("/")[-1] if "/" in filepath else filepath
                 
-                # Skip already processed
+                if not filename.endswith(".md"):
+                    continue
+                
                 if filepath in processed:
                     continue
                 
-                # Check filename
                 if has_fao_filename(filename):
-                    content, sha = get_file_content(filepath) or ("", "")
-                    fao_in_body = contains_fao_content(content) if content else False
+                    print(f"    ⚠️  FAO MATCH: {filename}")
+                    sys.stdout.flush()
+                    
+                    content_result = get_file_content(filepath)
+                    if content_result:
+                        content, sha = content_result
+                        fao_in_body = contains_fao_content(content)
+                        print(f"    Content: {len(content)} chars | FAO in body: {fao_in_body}")
+                    else:
+                        content = ""
+                        sha = file_info.get("sha", "")
+                        fao_in_body = False
+                        print(f"    WARNING: Could not fetch content, using sha from listing")
+                    
                     fao_files.append({
                         "path": filepath,
-                        "sha": sha if sha else file_info.get("sha", ""),
+                        "sha": sha,
                         "has_fao_content": fao_in_body,
                         "has_fao_filename": True,
                         "content": content,
                     })
-                    print(f"  ⚠️  FAO in filename: {filepath}")
                     sys.stdout.flush()
                     
         except Exception as e:
-            print(f"  Error scanning {folder}: {e}")
+            print(f"ERROR: {e}")
             sys.stdout.flush()
     
+    print(f"\nTotal FAO files found: {len(fao_files)}")
+    sys.stdout.flush()
     return fao_files
 
 
@@ -296,12 +322,9 @@ def scan_for_fao_files(state: Dict) -> List[Dict]:
 # ===========================================================================
 
 def rewrite_with_groq(content: str) -> str:
-    """Rewrite content using Groq to remove all FAO references."""
     if not GROQ_API_KEY:
         return ""
-    
     user_prompt = REWRITE_USER_TEMPLATE.replace("{content}", content[:3000])
-    
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.1-8b-instant",
@@ -312,25 +335,19 @@ def rewrite_with_groq(content: str) -> str:
         "temperature": 0.8,
         "max_tokens": 2000,
     }
-    
     try:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            return content
+            return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"    Groq error: {e}")
-    
     return ""
 
 
 def rewrite_with_mistral(content: str) -> str:
-    """Fallback: rewrite using Mistral."""
     if not MISTRAL_API_KEY:
         return ""
-    
     user_prompt = REWRITE_USER_TEMPLATE.replace("{content}", content[:3000])
-    
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "mistral-small-latest",
@@ -341,39 +358,30 @@ def rewrite_with_mistral(content: str) -> str:
         "temperature": 0.8,
         "max_tokens": 2000,
     }
-    
     try:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            return content
+            return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"    Mistral error: {e}")
-    
     return ""
 
 
 def rewrite_content(content: str) -> str:
-    """Rewrite content using available APIs. Returns empty string on failure."""
-    
     if GROQ_API_KEY:
         rewritten = rewrite_with_groq(content)
         if rewritten and len(rewritten) >= 300:
-            # Validate no FAO references remain
             if not contains_fao_content(rewritten):
                 return rewritten
             else:
                 print(f"    ⚠️  Rewrite still contains FAO — retrying...")
-                # Retry once with stronger temperature
                 rewritten2 = rewrite_with_groq(content)
                 if rewritten2 and len(rewritten2) >= 300 and not contains_fao_content(rewritten2):
                     return rewritten2
-    
     if MISTRAL_API_KEY:
         rewritten = rewrite_with_mistral(content)
         if rewritten and len(rewritten) >= 300 and not contains_fao_content(rewritten):
             return rewritten
-    
     return ""
 
 
@@ -382,18 +390,12 @@ def rewrite_content(content: str) -> str:
 # ===========================================================================
 
 def generate_clean_filename(original_path: str) -> str:
-    """Generate a clean filename without FAO reference."""
     folder = original_path.split("/")[0]
     filename = original_path.split("/")[-1]
-    
-    # Remove FAO from filename
     clean_name = re.sub(r'FAO[_\-]?', '', filename, flags=re.IGNORECASE)
     clean_name = re.sub(r'fao[_\-]?', '', clean_name)
-    
-    # Clean up double separators
     clean_name = re.sub(r'[_\-]{2,}', '_', clean_name)
     clean_name = clean_name.strip('_-')
-    
     return f"{folder}/{clean_name}"
 
 
@@ -402,10 +404,7 @@ def generate_clean_filename(original_path: str) -> str:
 # ===========================================================================
 
 def update_databases(original_path: str, new_path: str) -> bool:
-    """Update source tag in all 3 databases."""
     success_count = 0
-    
-    # Fly.io Postgres
     if FLY_PG_URL:
         try:
             import psycopg2
@@ -421,9 +420,7 @@ def update_databases(original_path: str, new_path: str) -> bool:
             success_count += 1
             print(f"    ✅ Fly.io PG updated")
         except Exception as e:
-            print(f"    ⚠️  Fly.io PG update failed: {e}")
-    
-    # Supabase
+            print(f"    ⚠️  Fly.io PG: {e}")
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             headers = {
@@ -440,9 +437,7 @@ def update_databases(original_path: str, new_path: str) -> bool:
             success_count += 1
             print(f"    ✅ Supabase updated")
         except Exception as e:
-            print(f"    ⚠️  Supabase update failed: {e}")
-    
-    # Neon
+            print(f"    ⚠️  Supabase: {e}")
     if NEON_URL:
         try:
             import psycopg2
@@ -458,8 +453,7 @@ def update_databases(original_path: str, new_path: str) -> bool:
             success_count += 1
             print(f"    ✅ Neon updated")
         except Exception as e:
-            print(f"    ⚠️  Neon update failed: {e}")
-    
+            print(f"    ⚠️  Neon: {e}")
     sys.stdout.flush()
     return success_count >= 1
 
@@ -469,9 +463,8 @@ def update_databases(original_path: str, new_path: str) -> bool:
 # ===========================================================================
 
 def run_fao_rewriter():
-    """Main rewriter — scans for FAO files and rewrites them."""
     print("=" * 60)
-    print("FAO Safety-Net Rewriter v1.0")
+    print("FAO Safety-Net Rewriter v1.1")
     print(f"Run: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 60)
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
@@ -479,14 +472,12 @@ def run_fao_rewriter():
     print(f"Max files per run: {MAX_FILES_PER_RUN}")
     sys.stdout.flush()
     
-    # Load state
     state = load_state()
     print(f"Previously processed: {len(state.get('processed_files', []))} files")
     print(f"Clean weeks: {state.get('clean_weeks', 0)}")
     print(f"Total rewritten: {state.get('total_rewritten', 0)}")
     sys.stdout.flush()
     
-    # Scan for FAO files
     fao_files = scan_for_fao_files(state)
     
     if not fao_files:
@@ -494,25 +485,16 @@ def run_fao_rewriter():
         save_state(state)
         print(f"\n✅ No FAO files found.")
         print(f"Clean weeks: {state['clean_weeks']}/4")
-        
         if state["clean_weeks"] >= 4:
-            print(f"🔒 4+ clean weeks — workflow will skip next run.")
-        
-        # Append audit entry
+            print(f"🔒 4+ clean weeks — self-disabling threshold reached.")
         append_audit_log(
             f"## {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-            f"- Status: CLEAN\n"
-            f"- Files found: 0\n"
-            f"- Clean weeks: {state['clean_weeks']}\n"
+            f"- Status: CLEAN\n- Files found: 0\n- Clean weeks: {state['clean_weeks']}\n"
         )
-        
         print("=" * 60)
         return
     
-    # Reset clean weeks counter
     state["clean_weeks"] = 0
-    
-    # Process files (up to MAX_FILES_PER_RUN)
     files_to_process = fao_files[:MAX_FILES_PER_RUN]
     rewritten_count = 0
     failed_count = 0
@@ -526,70 +508,68 @@ def run_fao_rewriter():
         print(f"\n📄 {filepath}")
         sys.stdout.flush()
         
-        needs_rewrite = file_info["has_fao_content"] or file_info["has_fao_filename"]
-        
-        if file_info["has_fao_content"]:
-            print(f"  ⚠️  FAO text found in body — rewriting...")
+        # Always rewrite if FAO in filename — the topic itself is FAO-derived
+        if file_info.get("content"):
+            print(f"  Rewriting content ({len(file_info['content'])} chars)...")
             sys.stdout.flush()
-            
-            rewritten = rewrite_content(file_info.get("content", ""))
-            if not rewritten:
-                failed_count += 1
-                print(f"  ❌ Rewrite failed")
-                state["processed_files"].append(filepath)
-                save_state(state)
-                continue
-            
-            new_content = rewritten
+            new_content = rewrite_content(file_info["content"])
         else:
-            # No FAO in body — just need to clean filename
-            new_content = file_info.get("content", "")
-            print(f"  FAO in filename only — renaming without rewrite")
+            print(f"  No content fetched — cannot rewrite, will rename only")
+            new_content = ""
         
-        # Generate clean filename
+        if not new_content:
+            failed_count += 1
+            print(f"  ❌ Rewrite failed — skipping")
+            state["processed_files"].append(filepath)
+            save_state(state)
+            continue
+        
+        # Strip markdown
+        new_content = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', new_content)
+        new_content = re.sub(r'^#{1,6}\s+', '', new_content, flags=re.MULTILINE)
+        new_content = new_content.strip()
+        
+        # Verify clean
+        if contains_fao_content(new_content):
+            print(f"  ❌ Rewrite still contains FAO after retry — skipping")
+            failed_count += 1
+            state["processed_files"].append(filepath)
+            save_state(state)
+            continue
+        
         new_path = generate_clean_filename(filepath)
-        print(f"  Rename: {filepath} → {new_path}")
+        print(f"  New path: {new_path}")
         sys.stdout.flush()
         
-        # Save new file
-        if update_file(new_path, new_content, "", f"FAO safety rewrite: {filepath}"):
-            # Delete old file
-            update_file(
-                filepath, "", file_info["sha"],
-                f"Remove FAO-referencing file: {filepath} → {new_path}"
-            )
-            print(f"  ✅ File replaced")
+        # Create new clean file
+        if update_file(new_path, new_content, "", f"FAO safety rewrite: {filepath} → {new_path}"):
+            # Delete original
+            delete_file(filepath, file_info["sha"], f"Remove FAO file: replaced by {new_path}")
+            print(f"  ✅ Rewritten and renamed")
             
-            # Update databases
             update_databases(filepath, new_path)
             
             rewritten_count += 1
             state["total_rewritten"] = state.get("total_rewritten", 0) + 1
         else:
             failed_count += 1
-            print(f"  ❌ File update failed")
+            print(f"  ❌ Failed to save new file")
         
-        # Mark as processed
         state["processed_files"].append(filepath)
         save_state(state)
         
-        # Delay between files
         if files_to_process.index(file_info) < len(files_to_process) - 1:
             time.sleep(5)
     
-    # Audit log
     audit_entry = (
         f"## {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        f"- Status: REWRITTEN\n"
-        f"- Files found: {len(fao_files)}\n"
+        f"- Status: REWRITTEN\n- Files found: {len(fao_files)}\n"
         f"- Files processed: {len(files_to_process)}\n"
-        f"- Rewritten: {rewritten_count}\n"
-        f"- Failed: {failed_count}\n"
+        f"- Rewritten: {rewritten_count}\n- Failed: {failed_count}\n"
         f"- Total all-time: {state['total_rewritten']}\n"
     )
     for f in files_to_process:
         audit_entry += f"- `{f['path']}` → `{generate_clean_filename(f['path'])}`\n"
-    
     append_audit_log(audit_entry)
     
     print(f"\n{'=' * 60}")
