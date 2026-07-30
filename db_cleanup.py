@@ -1,0 +1,152 @@
+"""
+Weekly database maintenance script for Ghana-GPT.
+==================================================
+Purges old records from Supabase, Neon, and Fly.io PG
+to stay within free tier limits.
+Runs via GitHub Actions every Sunday at midnight UTC.
+
+Purges:
+  - submission_queue: records older than 7 days (sent/dead)
+  - rate_limits: records older than 14 days
+  - error_logs: records older than 30 days
+
+Does NOT touch the submissions table — that metadata is valuable.
+All queries use parameterized statements to prevent SQL injection.
+"""
+
+import os
+import sys
+import psycopg2
+from datetime import datetime, timezone, timedelta
+
+
+def get_connection(connection_string: str):
+    """Create a database connection with a short timeout."""
+    if not connection_string:
+        return None
+    try:
+        return psycopg2.connect(connection_string, connect_timeout=10)
+    except Exception as e:
+        print(f"  Failed to connect: {e}")
+        return None
+
+
+def purge_database(connection_string: str, label: str) -> dict:
+    """
+    Purge old records from a single database.
+    Returns a dict with counts of deleted rows per table.
+    """
+    results = {"queue": 0, "rate_limits": 0, "error_logs": 0}
+
+    conn = get_connection(connection_string)
+    if not conn:
+        print(f"  {label}: Connection failed — skipping")
+        return results
+
+    try:
+        cur = conn.cursor()
+
+        # Purge processed queue items older than 7 days
+        cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cur.execute(
+            "DELETE FROM submission_queue WHERE status IN ('sent', 'dead') AND updated_at < %s",
+            (cutoff_7d,)
+        )
+        results["queue"] = cur.rowcount
+
+        # Purge rate limit logs older than 14 days
+        cutoff_14d = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        cur.execute(
+            "DELETE FROM rate_limits WHERE created_at < %s",
+            (cutoff_14d,)
+        )
+        results["rate_limits"] = cur.rowcount
+
+        # Purge error logs older than 30 days
+        cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        cur.execute(
+            "DELETE FROM error_logs WHERE created_at < %s",
+            (cutoff_30d,)
+        )
+        results["error_logs"] = cur.rowcount
+
+        conn.commit()
+        cur.close()
+        print(f"  {label}: Queue={results['queue']}, RateLimits={results['rate_limits']}, ErrorLogs={results['error_logs']}")
+
+    except Exception as e:
+        print(f"  {label}: Error during purge: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+    return results
+
+
+def check_database_size(connection_string: str, label: str) -> str:
+    """Check the current size of the database."""
+    conn = get_connection(connection_string)
+    if not conn:
+        return "unknown"
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+        size = cur.fetchone()[0]
+        cur.close()
+        return size
+    except Exception:
+        return "unknown"
+    finally:
+        conn.close()
+
+
+def main():
+    """Run purge on all configured databases."""
+    print(f"=== Ghana-GPT Database Cleanup ===")
+    print(f"Started: {datetime.now(timezone.utc).isoformat()}")
+    print()
+
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    neon_url = os.getenv("NEON_URL", "")
+    fly_pg_url = os.getenv("FLY_PG_URL", "")
+
+    if not supabase_url and not neon_url and not fly_pg_url:
+        print("ERROR: No database URLs configured.")
+        sys.exit(1)
+
+    # Purge Supabase
+    if supabase_url:
+        size_before = check_database_size(supabase_url, "Supabase")
+        print(f"Supabase size before: {size_before}")
+        print("Purging Supabase...")
+        purge_database(supabase_url, "Supabase")
+        size_after = check_database_size(supabase_url, "Supabase")
+        print(f"Supabase size after: {size_after}")
+        print()
+
+    # Purge Neon
+    if neon_url:
+        size_before = check_database_size(neon_url, "Neon")
+        print(f"Neon size before: {size_before}")
+        print("Purging Neon...")
+        purge_database(neon_url, "Neon")
+        size_after = check_database_size(neon_url, "Neon")
+        print(f"Neon size after: {size_after}")
+        print()
+
+    # Purge Fly.io PG
+    if fly_pg_url:
+        size_before = check_database_size(fly_pg_url, "Fly.io PG")
+        print(f"Fly.io PG size before: {size_before}")
+        print("Purging Fly.io PG...")
+        purge_database(fly_pg_url, "Fly.io PG")
+        size_after = check_database_size(fly_pg_url, "Fly.io PG")
+        print(f"Fly.io PG size after: {size_after}")
+        print()
+
+    print(f"=== Cleanup Complete ===")
+    print(f"Finished: {datetime.now(timezone.utc).isoformat()}")
+
+
+if __name__ == "__main__":
+    main()
