@@ -29,5 +29,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEON_URL: ${{ secrets.NEON_URL }}
-          COCKROACHDB_URL: ${{ secrets.COCKROACHDB_URL }}
+          FLY_PG_URL: ${{ secrets.FLY_PG_URL }}
         run: python db_cleanup.py
