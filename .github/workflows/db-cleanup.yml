@@ -11,11 +11,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout training repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          repository: ghana-gpt/ghana-gpt-training
-          token: ${{ secrets.GH_PAT }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -29,5 +26,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEON_URL: ${{ secrets.NEON_URL }}
-          FLY_PG_URL: ${{ secrets.FLY_PG_URL }}
         run: python db_cleanup.py
