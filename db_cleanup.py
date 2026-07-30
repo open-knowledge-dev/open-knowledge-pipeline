@@ -1,8 +1,7 @@
 """
 Weekly database maintenance script for Ghana-GPT.
 ==================================================
-Purges old records from Supabase, Neon, and Fly.io PG
-to stay within free tier limits.
+Purges old records from Supabase and Neon to stay within free tier limits.
 Runs via GitHub Actions every Sunday at midnight UTC.
 
 Purges:
@@ -80,62 +79,27 @@ def purge_database(connection_string: str, label: str) -> dict:
     return results
 
 
-def check_database_size(connection_string: str, label: str) -> str:
-    """Check the current size of the database."""
-    conn = get_connection(connection_string)
-    if not conn:
-        return "unknown"
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
-        size = cur.fetchone()[0]
-        cur.close()
-        return size
-    except Exception:
-        return "unknown"
-    finally:
-        conn.close()
-
-
 def main():
-    """Run purge on all configured databases."""
+    """Run purge on Supabase and Neon."""
     print(f"=== Ghana-GPT Database Cleanup ===")
     print(f"Started: {datetime.now(timezone.utc).isoformat()}")
     print()
 
     supabase_url = os.getenv("SUPABASE_URL", "")
     neon_url = os.getenv("NEON_URL", "")
-    fly_pg_url = os.getenv("FLY_PG_URL", "")
 
-    if not supabase_url and not neon_url and not fly_pg_url:
+    if not supabase_url and not neon_url:
         print("ERROR: No database URLs configured.")
         sys.exit(1)
 
     if supabase_url:
-        size_before = check_database_size(supabase_url, "Supabase")
-        print(f"Supabase size before: {size_before}")
         print("Purging Supabase...")
         purge_database(supabase_url, "Supabase")
-        size_after = check_database_size(supabase_url, "Supabase")
-        print(f"Supabase size after: {size_after}")
         print()
 
     if neon_url:
-        size_before = check_database_size(neon_url, "Neon")
-        print(f"Neon size before: {size_before}")
         print("Purging Neon...")
         purge_database(neon_url, "Neon")
-        size_after = check_database_size(neon_url, "Neon")
-        print(f"Neon size after: {size_after}")
-        print()
-
-    if fly_pg_url:
-        size_before = check_database_size(fly_pg_url, "Fly.io PG")
-        print(f"Fly.io PG size before: {size_before}")
-        print("Purging Fly.io PG...")
-        purge_database(fly_pg_url, "Fly.io PG")
-        size_after = check_database_size(fly_pg_url, "Fly.io PG")
-        print(f"Fly.io PG size after: {size_after}")
         print()
 
     print(f"=== Cleanup Complete ===")
