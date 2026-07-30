@@ -46,7 +46,6 @@ def purge_database(connection_string: str, label: str) -> dict:
     try:
         cur = conn.cursor()
 
-        # Purge processed queue items older than 7 days
         cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         cur.execute(
             "DELETE FROM submission_queue WHERE status IN ('sent', 'dead') AND updated_at < %s",
@@ -54,7 +53,6 @@ def purge_database(connection_string: str, label: str) -> dict:
         )
         results["queue"] = cur.rowcount
 
-        # Purge rate limit logs older than 14 days
         cutoff_14d = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
         cur.execute(
             "DELETE FROM rate_limits WHERE created_at < %s",
@@ -62,7 +60,6 @@ def purge_database(connection_string: str, label: str) -> dict:
         )
         results["rate_limits"] = cur.rowcount
 
-        # Purge error logs older than 30 days
         cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         cur.execute(
             "DELETE FROM error_logs WHERE created_at < %s",
@@ -114,7 +111,6 @@ def main():
         print("ERROR: No database URLs configured.")
         sys.exit(1)
 
-    # Purge Supabase
     if supabase_url:
         size_before = check_database_size(supabase_url, "Supabase")
         print(f"Supabase size before: {size_before}")
@@ -124,7 +120,6 @@ def main():
         print(f"Supabase size after: {size_after}")
         print()
 
-    # Purge Neon
     if neon_url:
         size_before = check_database_size(neon_url, "Neon")
         print(f"Neon size before: {size_before}")
@@ -134,7 +129,6 @@ def main():
         print(f"Neon size after: {size_after}")
         print()
 
-    # Purge Fly.io PG
     if fly_pg_url:
         size_before = check_database_size(fly_pg_url, "Fly.io PG")
         print(f"Fly.io PG size before: {size_before}")
