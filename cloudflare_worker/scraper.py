@@ -22,28 +22,19 @@ from cloudflare_worker.prompts import PROMPTS
 # --- CONFIGURATION ---
 ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
 API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
-MODEL = os.environ.get("CLOUDFLARE_MODEL", "@cf/qwen/qwen2.5-7b-instruct")
+MODEL = os.environ.get("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct-fp8")
 CATEGORY = os.environ.get("SCRAPER_CATEGORY", "general")
 
 BASE_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run"
 
 # Settings
 ENTRIES_PER_RUN = int(os.environ.get("ENTRIES_PER_RUN", "10"))
-MIN_WORDS = 400
-MAX_TOKENS = 1500
+MIN_WORDS = int(os.environ.get("MIN_WORDS", "400"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1500"))
 TEMPERATURE = 0.75
 MIN_DELAY = 10
 MAX_DELAY = 20
 PENDING_DIR = "pending"
-
-# Database logging (reuse same pattern as other scrapers)
-# Import your existing DB utilities if available
-try:
-    from db_utils import log_to_databases
-    DB_ENABLED = True
-except ImportError:
-    DB_ENABLED = False
-    print("⚠️ db_utils not found — skipping database logging")
 
 
 def generate_entry(topic, prompt_template, model):
@@ -73,7 +64,6 @@ def generate_entry(topic, prompt_template, model):
         
         if data.get("success") and "result" in data:
             text = data["result"]["response"]
-            # Strip any markdown code blocks from response
             if text.startswith("```"):
                 lines = text.split("\n")
                 lines = lines[1:] if lines else lines
@@ -96,7 +86,6 @@ def generate_entry(topic, prompt_template, model):
 
 def clean_content(text):
     """Clean generated text — remove common AI artifacts."""
-    # Remove phrases like "Here is a detailed article about..."
     prefixes = [
         "Here is a detailed",
         "Here is an article",
@@ -109,12 +98,10 @@ def clean_content(text):
     ]
     for prefix in prefixes:
         if text.lower().startswith(prefix.lower()):
-            # Find first newline and trim
             first_break = text.find("\n\n")
             if first_break > 0:
                 text = text[first_break:].strip()
             break
-    
     return text
 
 
@@ -123,7 +110,6 @@ def save_entry(content, topic, model, category):
     
     os.makedirs(PENDING_DIR, exist_ok=True)
     
-    # Generate safe filename
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     topic_slug = topic.lower().replace(" ", "_").replace("/", "-")[:60]
     content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
@@ -131,7 +117,6 @@ def save_entry(content, topic, model, category):
     
     word_count = len(content.split())
     
-    # Build markdown with metadata
     metadata = f"""<!-- meta -->
 <!-- source: cloudflare_workers_ai -->
 <!-- model: {model} -->
@@ -152,28 +137,6 @@ def save_entry(content, topic, model, category):
     return filename, word_count
 
 
-def log_metadata(filename, topic, model, category, word_count):
-    """Log entry metadata to all 3 databases — matching existing scraper pattern."""
-    if not DB_ENABLED:
-        return
-    
-    metadata = {
-        "filename": filename,
-        "topic": topic,
-        "source": "cloudflare_workers_ai",
-        "model": model,
-        "category": category,
-        "words": word_count,
-        "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    
-    try:
-        log_to_databases(metadata)
-    except Exception as e:
-        print(f"  ⚠️ Database logging failed (non-fatal): {e}")
-
-
 def run():
     """Main scraper loop."""
     
@@ -189,7 +152,6 @@ def run():
         print("❌ Missing CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN")
         sys.exit(1)
     
-    # Shuffle topics for variety
     shuffled_topics = TOPICS.copy()
     random.shuffle(shuffled_topics)
     
@@ -210,7 +172,6 @@ def run():
             
             if word_count >= MIN_WORDS:
                 filename, wc = save_entry(content, topic, MODEL, CATEGORY)
-                log_metadata(filename, topic, MODEL, CATEGORY, wc)
                 print(f"   ✅ Saved: {filename} ({wc} words)")
                 successful += 1
             else:
@@ -219,7 +180,6 @@ def run():
         else:
             failed += 1
         
-        # Rate limiting
         if i < ENTRIES_PER_RUN:
             delay = random.randint(MIN_DELAY, MAX_DELAY)
             print(f"   ⏳ Waiting {delay}s...")
