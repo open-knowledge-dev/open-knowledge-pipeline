@@ -2,7 +2,7 @@ name: Cloudflare AI - Mistral
 
 on:
   schedule:
-    - cron: '0 22 * * *'  # 10 PM UTC daily
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -20,15 +20,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r cloudflare_worker/requirements.txt
+        run: pip install -r cloudflare_worker/requirements.txt
 
       - name: Run Cloudflare Mistral Scraper
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_MODEL: "@cf/mistral/mistral-7b-instruct-v0.2"
-          SCRAPER_CATEGORY: "business"
+          CLOUDFLARE_MODEL: "@cf/mistral/mistral-7b-instruct-v0.2-lora"
+          SCRAPER_CATEGORY: "culture"
           ENTRIES_PER_RUN: "10"
         run: python cloudflare_worker/scraper.py
 
