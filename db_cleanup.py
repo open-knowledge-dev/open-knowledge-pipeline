@@ -1,7 +1,7 @@
 """
 Weekly database maintenance script for Ghana-GPT.
 ==================================================
-Purges old records from Supabase and Neon to stay within free tier limits.
+Purges old records from Supabase, Neon, and Render to stay within free tier limits.
 Runs via GitHub Actions every Sunday at midnight UTC.
 
 Purges:
@@ -9,7 +9,7 @@ Purges:
   - rate_limits: records older than 14 days
   - error_logs: records older than 30 days
 
-Does NOT touch the submissions table — that metadata is valuable.
+Does NOT touch the submissions table.
 All queries use parameterized statements to prevent SQL injection.
 """
 
@@ -80,26 +80,32 @@ def purge_database(connection_string: str, label: str) -> dict:
 
 
 def main():
-    """Run purge on Supabase and Neon."""
+    """Run purge on Supabase, Neon, and Render."""
     print(f"=== Ghana-GPT Database Cleanup ===")
     print(f"Started: {datetime.now(timezone.utc).isoformat()}")
     print()
 
-    supabase_url = os.getenv("SUPABASE_URL", "")
+    supabase_db_url = os.getenv("SUPABASE_DB_URL", "")
     neon_url = os.getenv("NEON_URL", "")
+    render_db_url = os.getenv("RENDER_DB_URL", "")
 
-    if not supabase_url and not neon_url:
+    if not supabase_db_url and not neon_url and not render_db_url:
         print("ERROR: No database URLs configured.")
         sys.exit(1)
 
-    if supabase_url:
+    if supabase_db_url:
         print("Purging Supabase...")
-        purge_database(supabase_url, "Supabase")
+        purge_database(supabase_db_url, "Supabase")
         print()
 
     if neon_url:
         print("Purging Neon...")
         purge_database(neon_url, "Neon")
+        print()
+
+    if render_db_url:
+        print("Purging Render...")
+        purge_database(render_db_url, "Render")
         print()
 
     print(f"=== Cleanup Complete ===")
