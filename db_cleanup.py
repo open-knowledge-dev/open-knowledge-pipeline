@@ -1,6 +1,6 @@
 """
-Weekly database maintenance script for Ghana-GPT.
-==================================================
+Weekly database maintenance script.
+====================================
 Purges old records from Supabase, Neon, and Render to stay within free tier limits.
 Runs via GitHub Actions every Sunday at midnight UTC.
 
@@ -81,7 +81,7 @@ def purge_database(connection_string: str, label: str) -> dict:
 
 def main():
     """Run purge on Supabase, Neon, and Render."""
-    print(f"=== Ghana-GPT Database Cleanup ===")
+    print(f"=== Database Cleanup ===")
     print(f"Started: {datetime.now(timezone.utc).isoformat()}")
     print()
 
