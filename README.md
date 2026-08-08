@@ -29,4 +29,5 @@ Add the following secrets to GitHub Actions:
 
 ## License
 
-MIT
+You are not allow to cut, copy, download, reproduce, copy, sell, clone anything here
+You are not allow to toruch or do anything here just  pass.
