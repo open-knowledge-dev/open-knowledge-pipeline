@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -24,6 +24,7 @@ jobs:
 
       - name: Run database cleanup
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           NEON_URL: ${{ secrets.NEON_URL }}
+          RENDER_DB_URL: ${{ secrets.RENDER_DB_URL }}
         run: python db_cleanup.py
