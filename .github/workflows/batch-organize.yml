@@ -1,26 +1,16 @@
-name: Batch Organize Pending Files
+name: Batch Organize Pending Files (DISABLED)
 
 on:
-  schedule:
-    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
   organize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install requests supabase
-      - name: Run batch organizer
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python batch_organize.py
+      - name: Disabled
+        run: |
+          echo "This workflow is disabled."
+          echo "File organization is now handled by batch-mover.yml (every 2 hours)."
+          echo "Database sync is handled by db-sync.yml (daily at 2 AM)."
+          echo "Security scan is handled by the training form content safety check."
