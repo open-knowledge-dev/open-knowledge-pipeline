@@ -16,9 +16,13 @@ import time
 import random
 import requests
 from datetime import datetime, timezone
+from pathlib import Path
 
-from cloudflare_worker.topics import TOPICS
-from cloudflare_worker.prompts import PROMPTS
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from topics import TOPICS
+from prompts import PROMPTS
 
 
 ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
