@@ -1,8 +1,8 @@
 """
-One-time importer — submits existing pending files to the training form.
-Reads files from a local pending_backup/ folder, extracts content,
-and submits through training.ghana-gpt.com/submit.
-Delete this file and the backup folder after the import completes.
+One-time importer — submits all pending backup files to the training form.
+Reads files from pending_backup/, submits through training.ghana-gpt.com/submit.
+Deletes files after successful submission. Self-deletes when done.
+Runs until the folder is empty.
 """
 
 import os
@@ -15,8 +15,8 @@ import requests
 TRAINING_FORM_URL = os.environ.get("TRAINING_FORM_URL", "")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
 BACKUP_DIR = "pending_backup"
-ENTRIES_PER_RUN = 25
-DELAY = 5
+BATCH_SIZE = 25
+DELAY = 3
 
 
 def extract_content(filepath):
@@ -27,7 +27,29 @@ def extract_content(filepath):
     category = "Other"
     cat_match = re.search(r'<!-- category:\s*(.+?) -->', text)
     if cat_match:
-        category = cat_match.group(1).strip()
+        cat = cat_match.group(1).strip()
+        cat_map = {
+            "culture": "Culture & Traditions",
+            "agriculture": "Agriculture & Farming",
+            "food": "Food & Cuisine",
+            "health": "Health & Medicine",
+            "history": "History & Heritage",
+            "language": "Language & Proverbs",
+            "music": "Music & Dance",
+            "business": "Business & Finance",
+            "governance": "Governance & Leadership",
+            "environment": "Environment & Nature",
+            "technology": "Technology & Innovation",
+            "education": "Education & Learning",
+            "sports": "Sports & Games",
+            "fashion": "Fashion & Textiles",
+            "arts": "Arts & Crafts",
+            "science": "Science & Innovation",
+            "religion": "Religion & Spirituality",
+            "tourism": "Tourism & Travel",
+            "family": "Family & Relationships",
+        }
+        category = cat_map.get(cat.lower(), "Culture & Traditions")
 
     topic = "Knowledge Entry"
     topic_match = re.search(r'^#\s+(.+)', text, re.MULTILINE)
@@ -43,7 +65,7 @@ def extract_content(filepath):
 
 
 def submit_to_form(topic, category, knowledge):
-    """Submit to training form."""
+    """Submit to training form — same pipeline as all scrapers."""
     session = requests.Session()
     try:
         form_response = session.get(TRAINING_FORM_URL, timeout=30)
@@ -91,45 +113,54 @@ def submit_to_form(topic, category, knowledge):
 
 def run():
     if not os.path.isdir(BACKUP_DIR):
-        print(f"ERROR: {BACKUP_DIR}/ folder not found.")
-        sys.exit(1)
+        print(f"ERROR: {BACKUP_DIR}/ folder not found. Nothing to import.")
+        sys.exit(0)
 
     files = [f for f in os.listdir(BACKUP_DIR) if f.endswith(".md")]
-    print(f"Found {len(files)} files to import.")
-    print(f"Submitting {ENTRIES_PER_RUN} per run.")
+    
+    if not files:
+        print("No files left. Cleaning up.")
+        os.rmdir(BACKUP_DIR)
+        return
+
+    print(f"Found {len(files)} files. Processing up to {BATCH_SIZE} this run.")
     print("-" * 50)
 
     submitted = 0
     failed = 0
+    batch = files[:BATCH_SIZE]
 
-    for i, filename in enumerate(files[:ENTRIES_PER_RUN], 1):
+    for i, filename in enumerate(batch, 1):
         filepath = os.path.join(BACKUP_DIR, filename)
-        print(f"[{i}/{min(len(files), ENTRIES_PER_RUN)}] {filename[:60]}...", end=" ")
+        print(f"[{i}/{len(batch)}] {filename[:60]}...", end=" ")
+        sys.stdout.flush()
 
         topic, category, content = extract_content(filepath)
 
         if len(content) < 100:
             print("SKIP (too short)")
             failed += 1
+            os.remove(filepath)
             continue
 
         success, sid = submit_to_form(topic, category, content)
         if success:
-            print(f"OK ({sid})")
+            print(sid)
             submitted += 1
             os.remove(filepath)
         else:
             print("FAIL")
             failed += 1
 
-        if i < min(len(files), ENTRIES_PER_RUN):
+        if i < len(batch):
             time.sleep(DELAY)
 
-    print(f"\nDone: {submitted} submitted | {failed} failed")
     remaining = len([f for f in os.listdir(BACKUP_DIR) if f.endswith(".md")])
-    print(f"Remaining: {remaining}")
+    print(f"\nDone: {submitted} submitted | {failed} failed | {remaining} remaining")
+    
     if remaining == 0:
-        print("All files imported. You can delete the pending_backup/ folder.")
+        os.rmdir(BACKUP_DIR)
+        print("All files imported. pending_backup/ deleted.")
 
 
 if __name__ == "__main__":
