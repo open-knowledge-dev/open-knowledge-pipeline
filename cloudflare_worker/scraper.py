@@ -70,6 +70,9 @@ def generate_entry(topic, prompt_template, model):
 
         if data.get("success") and "result" in data:
             text = data["result"]["response"]
+            if text is None:
+                print(f"  API returned null response")
+                return None
             if text.startswith("```"):
                 lines = text.split("\n")
                 lines = lines[1:] if lines else lines
@@ -227,6 +230,7 @@ def run():
                 print(f"   Too short: {word_count} words (min {MIN_WORDS})")
                 failed += 1
         else:
+            print(f"   No response from API")
             failed += 1
 
         if i < ENTRIES_PER_RUN:
