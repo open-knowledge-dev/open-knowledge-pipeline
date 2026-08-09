@@ -1,7 +1,7 @@
 """
-One-time importer — submits all pending backup files to the training form.
-Reads files from pending_backup/, submits through training.ghana-gpt.com/submit.
-Deletes files after successful submission. Self-deletes when done.
+One-time importer — submits pending files to the training form.
+Reads files from pending/, submits through training.ghana-gpt.com/submit.
+Deletes files after successful submission.
 Runs until the folder is empty.
 """
 
@@ -14,7 +14,7 @@ import requests
 
 TRAINING_FORM_URL = os.environ.get("TRAINING_FORM_URL", "")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
-BACKUP_DIR = "pending_backup"
+PENDING_DIR = "pending"
 BATCH_SIZE = 25
 DELAY = 3
 
@@ -112,15 +112,14 @@ def submit_to_form(topic, category, knowledge):
 
 
 def run():
-    if not os.path.isdir(BACKUP_DIR):
-        print(f"ERROR: {BACKUP_DIR}/ folder not found. Nothing to import.")
+    if not os.path.isdir(PENDING_DIR):
+        print(f"No pending/ folder. Nothing to import.")
         sys.exit(0)
 
-    files = [f for f in os.listdir(BACKUP_DIR) if f.endswith(".md")]
-    
+    files = [f for f in os.listdir(PENDING_DIR) if f.endswith(".md")]
+
     if not files:
-        print("No files left. Cleaning up.")
-        os.rmdir(BACKUP_DIR)
+        print("No files left in pending/. Done.")
         return
 
     print(f"Found {len(files)} files. Processing up to {BATCH_SIZE} this run.")
@@ -131,7 +130,7 @@ def run():
     batch = files[:BATCH_SIZE]
 
     for i, filename in enumerate(batch, 1):
-        filepath = os.path.join(BACKUP_DIR, filename)
+        filepath = os.path.join(PENDING_DIR, filename)
         print(f"[{i}/{len(batch)}] {filename[:60]}...", end=" ")
         sys.stdout.flush()
 
@@ -155,12 +154,8 @@ def run():
         if i < len(batch):
             time.sleep(DELAY)
 
-    remaining = len([f for f in os.listdir(BACKUP_DIR) if f.endswith(".md")])
+    remaining = len([f for f in os.listdir(PENDING_DIR) if f.endswith(".md")])
     print(f"\nDone: {submitted} submitted | {failed} failed | {remaining} remaining")
-    
-    if remaining == 0:
-        os.rmdir(BACKUP_DIR)
-        print("All files imported. pending_backup/ deleted.")
 
 
 if __name__ == "__main__":
