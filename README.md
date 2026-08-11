@@ -18,14 +18,6 @@ configured training pipeline.
 - MDN Web Docs (CC-BY-SA 4.0)
 - GitHub Public Repositories
 
-## Setup
-
-Add the following secrets to GitHub Actions:
-- `TRAINING_FORM_URL` — Target endpoint
-- `SCRAPER_API_KEY` — Authentication key
-- `GROQ_API_KEY` — AI generation API key
-- `MISTRAL_API_KEY` — AI generation API key (fallback)
-- `GH_TOKEN` — GitHub API token
 
 ## License
 
