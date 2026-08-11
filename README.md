@@ -21,5 +21,4 @@ configured training pipeline.
 
 ## License
 
-You are not allow to cut, copy, download, reproduce, copy, sell, clone anything here
-You are not allow to toruch or do anything here just  pass.
+This project's codes, files is / are available under the Our Private License. All content, codes, files, everything here is ours only, you are not allow to download, sell, replicate, steal, clone, share, reproduce,..... and even rewrite any part of this codes, files this license strickly.
