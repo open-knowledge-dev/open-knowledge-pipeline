@@ -19,7 +19,7 @@ Features:
 - AI writes in the target language
 
 APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
-Schedule: Every 3 hours via GitLab CI/CD pipeline schedule
+Schedule: Every 4 hours via GitHub Actions
 """
 
 import os
@@ -65,7 +65,7 @@ ALL_CATEGORIES = [
     "Science & Innovation", "Other",
 ]
 
-SCRAPER_NAME = "ai-scraper-environment"
+SCRAPER_NAME = os.getenv("SCRAPER_NAME", "ai-scraper-environment-github")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "admin/scraper-state-environment.json")
 
 MIN_CONTENT_LENGTH = 500
@@ -817,7 +817,7 @@ def run_ai_scraper(max_submissions: int = 10):
 
 
 if __name__ == "__main__":
-    is_automated = os.getenv("CI", "") == "true" or os.getenv("GITLAB_CI", "") == "true"
+    is_automated = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
     if is_automated:
         count = SUBMISSIONS_PER_RUN
     else:
