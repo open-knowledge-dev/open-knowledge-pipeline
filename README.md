@@ -12,7 +12,6 @@ configured training pipeline.
 
 - Wikipedia (CC-BY-SA 4.0)
 - Wikisource (CC-BY-SA / Public Domain)
-- UN FAO (Free to use)
 - Project Gutenberg (Public Domain)
 - Stack Exchange (CC-BY-SA 4.0)
 - MDN Web Docs (CC-BY-SA 4.0)
