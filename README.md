@@ -8,14 +8,6 @@ This project runs scheduled workflows that collect and process publicly availabl
 knowledge from various open sources. Content is rewritten and submitted to a
 configured training pipeline.
 
-## Sources
-
-- Wikipedia (CC-BY-SA 4.0)
-- Wikisource (CC-BY-SA / Public Domain)
-- Project Gutenberg (Public Domain)
-- Stack Exchange (CC-BY-SA 4.0)
-- MDN Web Docs (CC-BY-SA 4.0)
-- GitHub Public Repositories
 
 
 ## License
