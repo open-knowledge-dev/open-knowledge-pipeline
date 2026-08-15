@@ -496,7 +496,7 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     if GROQ_API_KEY:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama-3.1-8b-instant",
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
