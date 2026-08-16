@@ -1,0 +1,36 @@
+name: Cloudflare AI - Agriculture
+
+on:
+  schedule:
+    - cron: '15 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Cloudflare Agriculture Scraper
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_MODEL: "@cf/meta/llama-3.1-8b-instruct-fp8"
+          SCRAPER_CATEGORY: "Agriculture & Farming"
+          ENTRIES_PER_RUN: "10"
+          MIN_WORDS: "400"
+          MAX_TOKENS: "1500"
+          TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+        run: python cloudflare_worker/scraper.py
