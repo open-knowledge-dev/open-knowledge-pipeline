@@ -38,6 +38,9 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
+          CI: true
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          MAX_FILES: ${{ github.event.inputs.max_files || '10' }}
         run: python content_rewriter.py
       
       - name: Summary
