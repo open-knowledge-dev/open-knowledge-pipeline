@@ -1,0 +1,436 @@
+"""
+Content Rewriter — v2.0
+=======================
+Rewrites knowledge content to remove banned organizations and terms.
+Handles ALL banned organizations, not just FAO.
+Scans content, detects banned orgs, rewrites with African perspective.
+
+Previously: fao_rewriter.py (v1.0) — only handled FAO
+Now: content_rewriter.py (v2.0) — handles ALL banned orgs
+"""
+
+import os
+import sys
+import re
+import json
+import base64
+import requests
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Tuple
+from pathlib import Path
+
+# ===========================================================================
+# Configuration
+# ===========================================================================
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+GH_TOKEN = os.getenv("GH_TOKEN", "")
+KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
+GITHUB_API = "https://api.github.com"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+REQUEST_TIMEOUT = 90
+
+# ===========================================================================
+# Banned Organizations
+# ===========================================================================
+
+BANNED_ORGS = [
+    "FAO",
+    "Food and Agriculture Organization",
+    "WHO",
+    "World Health Organization",
+    "UN",
+    "United Nations",
+    "World Bank",
+    "IMF",
+    "International Monetary Fund",
+    "UNDP",
+    "UNESCO",
+    "UNICEF",
+    "USAID",
+    "DFID",
+    "GIZ",
+    "World Food Programme",
+    "WFP",
+    "International Labour Organization",
+    "ILO",
+    "World Trade Organization",
+    "WTO",
+    "African Development Bank",
+    "AfDB",
+    "European Union",
+    "EU"
+]
+
+BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
+BANNED_TERMS = [
+    "development program", "aid program", "international assistance",
+    "foreign aid", "development agency", "grant", "funding", "NGO",
+    "non-governmental"
+]
+
+REWRITE_PROMPT = (
+    f"You are an African knowledge expert. Rewrite the following content to remove "
+    f"all references to these organizations: {BANNED_ORGS_STRING}. "
+    f"Also remove references to: {', '.join(BANNED_TERMS)}. "
+    f"Rewrite from an African perspective only. Keep all factual information "
+    f"but present it as local African knowledge. "
+    f"Maintain the same length and detail level. "
+    f"Write in plain text. No markdown."
+)
+
+# ===========================================================================
+# GitHub Operations
+# ===========================================================================
+
+def _github_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
+    return headers
+
+
+def get_repo_contents(path: str) -> List[Dict]:
+    """Get contents of a directory in the knowledge repo."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=30)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        print(f"  Error getting contents: {e}")
+        return []
+
+
+def get_file_content(path: str) -> Optional[str]:
+    """Get content of a file from the knowledge repo."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("content"):
+                return base64.b64decode(data["content"]).decode("utf-8")
+        return None
+    except Exception as e:
+        print(f"  Error getting file: {e}")
+        return None
+
+
+def update_file_content(path: str, content: str, message: str) -> bool:
+    """Update a file in the knowledge repo."""
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    sha = ""
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=30)
+        if response.status_code == 200:
+            sha = response.json().get("sha", "")
+    except Exception:
+        pass
+
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        response = requests.put(url, json=payload, headers=_github_headers(), timeout=30)
+        return response.status_code in [200, 201]
+    except Exception as e:
+        print(f"  Error updating file: {e}")
+        return False
+
+
+# ===========================================================================
+# Content Detection & Rewriting
+# ===========================================================================
+
+def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
+    """Check if content contains banned organizations or terms."""
+    text_lower = text.lower()
+    found = []
+    for org in BANNED_ORGS:
+        if org.lower() in text_lower:
+            found.append(org)
+    for term in BANNED_TERMS:
+        if term in text_lower:
+            found.append(term)
+    return len(found) > 0, found
+
+
+def rewrite_with_groq(content: str) -> Optional[str]:
+    """Rewrite content using Groq."""
+    if not GROQ_API_KEY:
+        return None
+
+    system_prompt = REWRITE_PROMPT
+
+    # Truncate if too long
+    if len(content) > 8000:
+        content = content[:8000] + "... [truncated]"
+
+    user_prompt = f"Rewrite this content:\n\n{content}"
+
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4000,
+    }
+
+    try:
+        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        return None
+    except Exception as e:
+        print(f"  Groq error: {e}")
+        return None
+
+
+def rewrite_with_mistral(content: str) -> Optional[str]:
+    """Rewrite content using Mistral (fallback)."""
+    if not MISTRAL_API_KEY:
+        return None
+
+    if len(content) > 8000:
+        content = content[:8000] + "... [truncated]"
+
+    system_prompt = REWRITE_PROMPT
+    user_prompt = f"Rewrite this content:\n\n{content}"
+
+    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4000,
+    }
+
+    try:
+        response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        return None
+    except Exception as e:
+        print(f"  Mistral error: {e}")
+        return None
+
+
+def rewrite_content(content: str) -> Optional[str]:
+    """Rewrite content using available AI APIs."""
+    if GROQ_API_KEY:
+        rewritten = rewrite_with_groq(content)
+        if rewritten:
+            return rewritten
+
+    if MISTRAL_API_KEY:
+        rewritten = rewrite_with_mistral(content)
+        if rewritten:
+            return rewritten
+
+    return None
+
+
+# ===========================================================================
+# Main Cleanup
+# ===========================================================================
+
+def scan_and_rewrite_directory(path: str, dry_run: bool = True, max_files: int = None) -> Dict:
+    """Scan a directory for banned content and rewrite files."""
+    results = {
+        "scanned": 0,
+        "found_banned": 0,
+        "rewritten": 0,
+        "failed": 0,
+        "files": []
+    }
+
+    items = get_repo_contents(path)
+    if not items:
+        print(f"  No items found in {path}")
+        return results
+
+    for item in items:
+        if results["rewritten"] >= (max_files or 999999):
+            break
+
+        if item.get("type") == "dir":
+            print(f"  Scanning subdirectory: {item['name']}")
+            sub_results = scan_and_rewrite_directory(
+                f"{path}/{item['name']}", dry_run, max_files
+            )
+            for key in results:
+                if key != "files":
+                    results[key] += sub_results.get(key, 0)
+            results["files"].extend(sub_results.get("files", []))
+            continue
+
+        if not item.get("name", "").endswith(".md"):
+            continue
+
+        file_path = item["path"]
+        print(f"\n  Checking: {file_path}")
+
+        content = get_file_content(file_path)
+        if not content:
+            print(f"    ⚠️ Could not read file")
+            continue
+
+        results["scanned"] += 1
+
+        has_banned, found = detect_banned_content(content)
+        if not has_banned:
+            print(f"    ✅ No banned content")
+            continue
+
+        results["found_banned"] += 1
+        print(f"    ⚠️ Found banned content: {', '.join(found)}")
+
+        if dry_run:
+            print(f"    [DRY RUN] Would rewrite this file")
+            results["files"].append({
+                "path": file_path,
+                "found": found,
+                "action": "would_rewrite"
+            })
+            continue
+
+        # Rewrite
+        rewritten = rewrite_content(content)
+        if not rewritten:
+            print(f"    ❌ Failed to rewrite content")
+            results["failed"] += 1
+            continue
+
+        # Check rewritten content
+        still_banned, still_found = detect_banned_content(rewritten)
+        if still_banned:
+            print(f"    ⚠️ Rewrite still contains banned content: {', '.join(still_found)}")
+            results["failed"] += 1
+            continue
+
+        # Update file
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"Content rewrite: removed banned organizations [{timestamp}]"
+        if update_file_content(file_path, rewritten, message):
+            results["rewritten"] += 1
+            results["files"].append({
+                "path": file_path,
+                "found": found,
+                "action": "rewritten"
+            })
+            print(f"    ✅ Rewritten successfully")
+        else:
+            results["failed"] += 1
+            print(f"    ❌ Failed to update file")
+
+        time.sleep(2)
+
+    return results
+
+
+def main():
+    """Main entry point."""
+    print("=" * 70)
+    print("Content Rewriter v2.0 — Banned Organization Cleanup")
+    print("=" * 70)
+    print(f"Banned orgs: {len(BANNED_ORGS)}")
+    print(f"Banned terms: {len(BANNED_TERMS)}")
+    print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
+    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
+    print(f"Repo: {KNOWLEDGE_REPO}")
+    print("=" * 70)
+
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
+        print("ERROR: GitHub credentials not configured")
+        return
+
+    if not GROQ_API_KEY and not MISTRAL_API_KEY:
+        print("ERROR: No AI API keys configured")
+        return
+
+    dry_run_input = input("\nDRY RUN? (y/n): ").strip().lower()
+    dry_run = dry_run_input == "y"
+
+    max_files_input = input("Max files to rewrite (default 10, 0 for all): ").strip()
+    try:
+        max_files = int(max_files_input) if max_files_input else 10
+        if max_files == 0:
+            max_files = None
+    except ValueError:
+        max_files = 10
+
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Scanning knowledge repo...")
+    print(f"Max files: {max_files or 'ALL'}")
+    print("-" * 70)
+
+    # Scan all category directories
+    categories = [
+        "agriculture_farming", "business_finance", "culture_traditions",
+        "education_learning", "health_medicine", "technology_innovation",
+        "tourism_travel", "history_heritage", "food_cuisine",
+        "music_dance", "language_proverbs", "religion_spirituality",
+        "sports_games", "fashion_textiles", "environment_nature",
+        "governance_leadership", "family_relationships", "arts_crafts",
+        "science_innovation", "other"
+    ]
+
+    total_results = {
+        "scanned": 0,
+        "found_banned": 0,
+        "rewritten": 0,
+        "failed": 0,
+        "files": []
+    }
+
+    for category in categories:
+        print(f"\n--- Scanning {category} ---")
+        results = scan_and_rewrite_directory(category, dry_run, max_files)
+        for key in total_results:
+            if key != "files":
+                total_results[key] += results.get(key, 0)
+        total_results["files"].extend(results.get("files", []))
+
+        if max_files and total_results["rewritten"] >= max_files:
+            print(f"\nReached max files limit ({max_files})")
+            break
+
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"Files scanned: {total_results['scanned']}")
+    print(f"Files with banned content: {total_results['found_banned']}")
+    print(f"Files rewritten: {total_results['rewritten']}")
+    print(f"Files failed: {total_results['failed']}")
+
+    if total_results["files"]:
+        print(f"\nDetailed log:")
+        for f in total_results["files"]:
+            status = f.get("action", "unknown")
+            if status == "would_rewrite":
+                print(f"  [DRY RUN] {f['path']} — found: {', '.join(f['found'])}")
+            elif status == "rewritten":
+                print(f"  [✅ REWRITTEN] {f['path']} — removed: {', '.join(f['found'])}")
+            else:
+                print(f"  [❌ FAILED] {f['path']}")
+
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
