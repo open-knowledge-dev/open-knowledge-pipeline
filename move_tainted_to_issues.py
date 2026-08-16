@@ -3,7 +3,7 @@
 Move Tainted Files to Issues — v1.0
 ====================================
 Scans all knowledge files for banned content.
-Moves tainted files to /issues/ folder.
+Moves tainted files to issues/ folder in the private repo.
 """
 
 import os
@@ -50,7 +50,6 @@ BANNED_TERMS = [
     "non-governmental"
 ]
 
-# Build regex patterns
 def build_banned_patterns() -> List[re.Pattern]:
     patterns = []
     for term in BANNED_ORGS:
@@ -124,50 +123,56 @@ def get_file_sha(path: str) -> Optional[str]:
         return None
 
 
-def move_file(source_path: str, dest_path: str, dry_run: bool = True) -> bool:
-    """Move a file by copying content then deleting original."""
-    if dry_run:
-        return True
-
-    # Get content and SHA
-    content = get_file_content(source_path)
-    if not content:
-        return False
-
-    sha = get_file_sha(source_path)
-    if not sha:
-        return False
-
-    # Create destination
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{dest_path}"
+def create_file(path: str, content: str, message: str) -> bool:
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     payload = {
-        "message": f"Move tainted file: {source_path} → issues/",
+        "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
         "branch": "main",
     }
-
     try:
         response = requests.put(url, json=payload, headers=_github_headers(), timeout=30)
-        if response.status_code not in [200, 201]:
-            return False
+        return response.status_code in [200, 201]
     except Exception as e:
-        print(f"  Error creating destination: {e}")
+        print(f"  Error creating file: {e}")
         return False
 
-    # Delete source
-    delete_url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{source_path}"
-    delete_payload = {
-        "message": f"Move tainted file to issues/",
+
+def delete_file(path: str, message: str) -> bool:
+    sha = get_file_sha(path)
+    if not sha:
+        return False
+
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    payload = {
+        "message": message,
         "sha": sha,
         "branch": "main",
     }
 
     try:
-        response = requests.delete(delete_url, json=delete_payload, headers=_github_headers(), timeout=30)
+        response = requests.delete(url, json=payload, headers=_github_headers(), timeout=30)
         return response.status_code == 200
     except Exception as e:
-        print(f"  Error deleting source: {e}")
+        print(f"  Error deleting file: {e}")
         return False
+
+
+def move_file(source_path: str, dest_path: str, dry_run: bool = True) -> bool:
+    if dry_run:
+        return True
+
+    content = get_file_content(source_path)
+    if not content:
+        return False
+
+    if not create_file(dest_path, content, f"Move tainted file: {source_path}"):
+        return False
+
+    if not delete_file(source_path, f"Moved to issues/: {dest_path}"):
+        return False
+
+    return True
 
 
 # ===========================================================================
@@ -223,7 +228,6 @@ def scan_and_move_directory(path: str, dry_run: bool = True, issues_path: str = 
         results["found_banned"] += 1
         print(f"    ⚠️ Found banned content: {', '.join(found[:5])}")
 
-        # Create destination path
         filename = item["name"]
         dest_path = f"{issues_path}/{filename}"
 
@@ -302,6 +306,16 @@ def main():
     print(f"Files with banned content: {total_results['found_banned']}")
     print(f"Files moved to issues/: {total_results['moved']}")
     print(f"Files failed: {total_results['failed']}")
+
+    if total_results["files"]:
+        print("\nFile list:")
+        for f in total_results["files"]:
+            action = f.get("action", "unknown")
+            if action == "would_move":
+                print(f"  [DRY RUN] {f['source']} → {f['dest']}")
+            elif action == "moved":
+                print(f"  [MOVED] {f['source']} → {f['dest']}")
+
     print("=" * 70)
 
     if total_results["failed"] > 0:
