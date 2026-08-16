@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter Scraper — v1.0
-==============================
-Picks tainted files from /issues/
+Issue Rewriter — v1.0
+======================
+Picks tainted files from issues/
 Rewrites content (removes banned orgs)
 Submits to training form as new knowledge
 Deletes the original file after successful submission
@@ -273,7 +273,6 @@ def rewrite_content(content: str) -> Optional[str]:
         if not rewritten:
             continue
 
-        # Clean markdown
         rewritten = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', rewritten)
         rewritten = re.sub(r'^#{1,6}\s+', '', rewritten, flags=re.MULTILINE)
         rewritten = re.sub(r'```[^`]*```', '', rewritten)
@@ -346,7 +345,6 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str = "E
 # ===========================================================================
 
 def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
-    """Process a single issue file: rewrite, submit, delete."""
     result = {
         "file": file_path,
         "status": "unknown",
@@ -356,17 +354,13 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
 
     print(f"\n  Processing: {file_path}")
 
-    # Get content
     content = get_file_content(file_path)
     if not content:
         result["status"] = "error"
         result["error"] = "Could not read file"
         return result
 
-    # Extract original category from path or content
-    # Try to guess from filename or content
     category = "Other"
-    # Look for category in filename
     for cat in ["agriculture", "business", "culture", "education", "health",
                 "technology", "tourism", "history", "food", "music",
                 "language", "religion", "sports", "fashion", "environment",
@@ -375,11 +369,8 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
             category = cat.title().replace("_", " & ")
             break
 
-    # Extract topic from filename
     filename = file_path.split("/")[-1]
-    # Remove date and ID from filename
     topic_parts = filename.replace(".md", "").split("-")
-    # Skip date parts (first 2-3 parts)
     topic_parts = [p for p in topic_parts if not re.match(r'^\d{8}$', p) and not re.match(r'^\d{4}$', p)]
     topic = " ".join(topic_parts).replace("_", " ").title()
     if not topic or len(topic) < 5:
@@ -393,20 +384,17 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
         result["status"] = "dry_run"
         return result
 
-    # Rewrite
     rewritten = rewrite_content(content)
     if not rewritten:
         result["status"] = "error"
         result["error"] = "Failed to rewrite after 3 attempts"
         return result
 
-    # Check length
     if len(rewritten.split()) < 300:
         result["status"] = "error"
         result["error"] = "Rewritten content too short"
         return result
 
-    # Submit to training form
     success, submission_id = submit_to_form(topic, category, rewritten, "English")
 
     if not success:
@@ -417,7 +405,6 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
     result["submission_id"] = submission_id
     print(f"    ✅ Submitted! ID: {submission_id}")
 
-    # Delete the original file from issues/
     if delete_file(file_path, f"Rewritten and submitted: {submission_id}"):
         result["status"] = "completed"
         print(f"    ✅ Original file deleted")
@@ -430,7 +417,7 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
 
 def main():
     print("=" * 70)
-    print("Issue Rewriter Scraper v1.0")
+    print("Issue Rewriter v1.0")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"DRY RUN: {DRY_RUN}")
@@ -446,7 +433,6 @@ def main():
         print("ERROR: No AI API keys configured")
         sys.exit(1)
 
-    # Get all files in issues/
     issues = get_repo_contents("issues")
     if not issues:
         print("No files in issues/ folder.")
