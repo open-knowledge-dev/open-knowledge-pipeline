@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Content Rewriter — v2.1
+Content Rewriter — v2.2
 =======================
 Rewrites knowledge content to remove banned organizations and terms.
-Handles ALL banned organizations, not just FAO.
-Scans content, detects banned orgs, rewrites with African perspective.
-
-Previously: fao_rewriter.py (v1.0) — only handled FAO
-Now: content_rewriter.py (v2.1) — handles ALL banned orgs, CI-compatible
+Handles ALL banned organizations.
+- Stronger rewrite prompt with explicit instructions
+- Retry logic (3 attempts) if banned content remains
+- Aggressive banning with exact matches
+- CI-compatible
 """
 
 import os
@@ -19,7 +19,6 @@ import requests
 import time
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
-from pathlib import Path
 
 # ===========================================================================
 # Configuration
@@ -40,9 +39,10 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 MAX_FILES = int(os.getenv("MAX_FILES", "10")) if os.getenv("MAX_FILES") else 10
 
 # ===========================================================================
-# Banned Organizations
+# Banned Organizations — Exact match patterns
 # ===========================================================================
 
+# Full organization names — exact matches only (case-insensitive)
 BANNED_ORGS = [
     "FAO",
     "Food and Agriculture Organization",
@@ -68,25 +68,80 @@ BANNED_ORGS = [
     "African Development Bank",
     "AfDB",
     "European Union",
-    "EU"
 ]
 
-BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
 BANNED_TERMS = [
-    "development program", "aid program", "international assistance",
-    "foreign aid", "development agency", "grant", "funding", "NGO",
+    "development program",
+    "aid program",
+    "international assistance",
+    "foreign aid",
+    "development agency",
+    "grant",
+    "funding",
+    "NGO",
     "non-governmental"
 ]
 
+# Regex patterns to avoid false positives
+# e.g., "UN" should match "UN " but not "under" or "university"
+def build_banned_patterns() -> List[re.Pattern]:
+    """Build regex patterns for banned terms to avoid false positives."""
+    patterns = []
+    for term in BANNED_ORGS:
+        # For short terms like "UN" or "EU", use word boundaries
+        if len(term) <= 3:
+            patterns.append(re.compile(rf'\b{re.escape(term)}\b', re.IGNORECASE))
+        else:
+            patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+    for term in BANNED_TERMS:
+        patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+    return patterns
+
+BANNED_PATTERNS = build_banned_patterns()
+
+# ===========================================================================
+# Strong Rewrite Prompt
+# ===========================================================================
+
+BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
+BANNED_TERMS_STRING = ", ".join(BANNED_TERMS)
+
 REWRITE_PROMPT = (
-    f"You are an African knowledge expert. Rewrite the following content to remove "
-    f"all references to these organizations: {BANNED_ORGS_STRING}. "
-    f"Also remove references to: {', '.join(BANNED_TERMS)}. "
-    f"Rewrite from an African perspective only. Keep all factual information "
-    f"but present it as local African knowledge. "
-    f"Maintain the same length and detail level. "
-    f"Write in plain text. No markdown."
+    f"You are an African knowledge expert. You MUST rewrite the content below to "
+    f"REMOVE ALL references to international organizations and external entities.\n\n"
+    f"DO NOT mention these organizations at all: {BANNED_ORGS_STRING}\n"
+    f"DO NOT mention these terms at all: {BANNED_TERMS_STRING}\n\n"
+    f"Rewrite rules:\n"
+    f"1. Remove every mention of the above organizations and terms — delete or replace them\n"
+    f"2. Never say 'according to WHO' — say 'according to local experts'\n"
+    f"3. Never say 'UN program' — say 'community program'\n"
+    f"4. Never say 'World Bank' — say 'regional initiative'\n"
+    f"5. Never say 'funding' or 'grant' — remove or rewrite without these terms\n"
+    f"6. Present all information as African knowledge from local communities\n"
+    f"7. Keep all factual information intact\n"
+    f"8. Write in plain text. No markdown.\n"
+    f"9. At least 400 words.\n\n"
+    f"IMPORTANT: After rewriting, check your work. If you see ANY banned term, "
+    f"you have failed. Remove them completely."
 )
+
+# ===========================================================================
+# Banned Content Detection
+# ===========================================================================
+
+def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
+    """Check if content contains banned organizations or terms using regex."""
+    found = []
+    for pattern in BANNED_PATTERNS:
+        if pattern.search(text):
+            # Get the matched term for reporting
+            match = pattern.search(text)
+            if match:
+                found.append(match.group(0))
+    # Remove duplicates
+    found = list(set(found))
+    return len(found) > 0, found
+
 
 # ===========================================================================
 # GitHub Operations
@@ -155,34 +210,28 @@ def update_file_content(path: str, content: str, message: str) -> bool:
 
 
 # ===========================================================================
-# Content Detection & Rewriting
+# Content Rewriting with Retry
 # ===========================================================================
 
-def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
-    """Check if content contains banned organizations or terms."""
-    text_lower = text.lower()
-    found = []
-    for org in BANNED_ORGS:
-        if org.lower() in text_lower:
-            found.append(org)
-    for term in BANNED_TERMS:
-        if term in text_lower:
-            found.append(term)
-    return len(found) > 0, found
-
-
-def rewrite_with_groq(content: str) -> Optional[str]:
+def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
     """Rewrite content using Groq."""
     if not GROQ_API_KEY:
         return None
 
-    system_prompt = REWRITE_PROMPT
+    extra = ""
+    if attempt > 0:
+        extra = (
+            f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. "
+            f"Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}. "
+            f"Be more aggressive. Do NOT mention any international organizations."
+        )
 
-    # Truncate if too long
+    system_prompt = REWRITE_PROMPT + extra
+
     if len(content) > 8000:
-        content = content[:8000] + "... [truncated]"
+        content = content[:8000]
 
-    user_prompt = f"Rewrite this content:\n\n{content}"
+    user_prompt = f"Rewrite this content. Remove ALL banned organizations and terms:\n\n{content}"
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -191,7 +240,7 @@ def rewrite_with_groq(content: str) -> Optional[str]:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.7,
+        "temperature": 0.4,  # Lower for more consistent output
         "max_tokens": 4000,
     }
 
@@ -205,16 +254,24 @@ def rewrite_with_groq(content: str) -> Optional[str]:
         return None
 
 
-def rewrite_with_mistral(content: str) -> Optional[str]:
+def rewrite_with_mistral(content: str, attempt: int = 0) -> Optional[str]:
     """Rewrite content using Mistral (fallback)."""
     if not MISTRAL_API_KEY:
         return None
 
-    if len(content) > 8000:
-        content = content[:8000] + "... [truncated]"
+    extra = ""
+    if attempt > 0:
+        extra = (
+            f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. "
+            f"Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}."
+        )
 
-    system_prompt = REWRITE_PROMPT
-    user_prompt = f"Rewrite this content:\n\n{content}"
+    system_prompt = REWRITE_PROMPT + extra
+
+    if len(content) > 8000:
+        content = content[:8000]
+
+    user_prompt = f"Rewrite this content. Remove ALL banned organizations and terms:\n\n{content}"
 
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -223,7 +280,7 @@ def rewrite_with_mistral(content: str) -> Optional[str]:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.7,
+        "temperature": 0.4,
         "max_tokens": 4000,
     }
 
@@ -238,16 +295,38 @@ def rewrite_with_mistral(content: str) -> Optional[str]:
 
 
 def rewrite_content(content: str) -> Optional[str]:
-    """Rewrite content using available AI APIs."""
-    if GROQ_API_KEY:
-        rewritten = rewrite_with_groq(content)
-        if rewritten:
+    """Rewrite content with retry logic (max 3 attempts)."""
+    max_retries = 3
+    current_content = content
+
+    for attempt in range(max_retries):
+        rewritten = None
+
+        if GROQ_API_KEY:
+            rewritten = rewrite_with_groq(current_content, attempt)
+        elif MISTRAL_API_KEY:
+            rewritten = rewrite_with_mistral(current_content, attempt)
+
+        if not rewritten:
+            if attempt < max_retries - 1:
+                continue
+            return None
+
+        # Clean markdown
+        rewritten = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', rewritten)
+        rewritten = re.sub(r'^#{1,6}\s+', '', rewritten, flags=re.MULTILINE)
+        rewritten = re.sub(r'```[^`]*```', '', rewritten)
+        rewritten = re.sub(r'`([^`]+)`', r'\1', rewritten)
+        rewritten = re.sub(r'\n{3,}', '\n\n', rewritten)
+        rewritten = rewritten.strip()
+
+        # Check if banned content remains
+        has_banned, found = detect_banned_content(rewritten)
+        if not has_banned:
             return rewritten
 
-    if MISTRAL_API_KEY:
-        rewritten = rewrite_with_mistral(content)
-        if rewritten:
-            return rewritten
+        print(f"    ⚠️ Attempt {attempt + 1} still has: {', '.join(found[:5])}")
+        current_content = rewritten
 
     return None
 
@@ -305,7 +384,7 @@ def scan_and_rewrite_directory(path: str, dry_run: bool = True, max_files: int =
             continue
 
         results["found_banned"] += 1
-        print(f"    ⚠️ Found banned content: {', '.join(found)}")
+        print(f"    ⚠️ Found banned content: {', '.join(found[:5])}")
 
         if dry_run:
             print(f"    [DRY RUN] Would rewrite this file")
@@ -316,17 +395,17 @@ def scan_and_rewrite_directory(path: str, dry_run: bool = True, max_files: int =
             })
             continue
 
-        # Rewrite
+        # Rewrite with retry
         rewritten = rewrite_content(content)
         if not rewritten:
-            print(f"    ❌ Failed to rewrite content")
+            print(f"    ❌ Failed to rewrite after 3 attempts")
             results["failed"] += 1
             continue
 
-        # Check rewritten content
+        # Final check
         still_banned, still_found = detect_banned_content(rewritten)
         if still_banned:
-            print(f"    ⚠️ Rewrite still contains banned content: {', '.join(still_found)}")
+            print(f"    ❌ Still has banned content: {', '.join(still_found[:5])}")
             results["failed"] += 1
             continue
 
@@ -353,7 +432,7 @@ def scan_and_rewrite_directory(path: str, dry_run: bool = True, max_files: int =
 def main():
     """Main entry point."""
     print("=" * 70)
-    print("Content Rewriter v2.1 — Banned Organization Cleanup")
+    print("Content Rewriter v2.2 — Banned Organization Cleanup")
     print("=" * 70)
     print(f"Banned orgs: {len(BANNED_ORGS)}")
     print(f"Banned terms: {len(BANNED_TERMS)}")
@@ -366,13 +445,12 @@ def main():
 
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         print("ERROR: GitHub credentials not configured")
-        return
+        sys.exit(1)
 
     if not GROQ_API_KEY and not MISTRAL_API_KEY:
         print("ERROR: No AI API keys configured")
-        return
+        sys.exit(1)
 
-    # Get settings from environment or interactive input
     dry_run = DRY_RUN
     max_files = MAX_FILES
 
@@ -395,7 +473,6 @@ def main():
     print(f"Max files: {max_files or 'ALL'}")
     print("-" * 70)
 
-    # Scan all category directories
     categories = [
         "agriculture_farming", "business_finance", "culture_traditions",
         "education_learning", "health_medicine", "technology_innovation",
@@ -439,15 +516,14 @@ def main():
         for f in total_results["files"]:
             status = f.get("action", "unknown")
             if status == "would_rewrite":
-                print(f"  [DRY RUN] {f['path']} — found: {', '.join(f['found'])}")
+                print(f"  [DRY RUN] {f['path']} — found: {', '.join(f['found'][:3])}")
             elif status == "rewritten":
-                print(f"  [✅ REWRITTEN] {f['path']} — removed: {', '.join(f['found'])}")
+                print(f"  [✅] {f['path']}")
             else:
-                print(f"  [❌ FAILED] {f['path']}")
+                print(f"  [❌] {f['path']}")
 
     print("=" * 70)
 
-    # Exit with error if files failed (so workflow can alert)
     if total_results['failed'] > 0:
         sys.exit(1)
 
