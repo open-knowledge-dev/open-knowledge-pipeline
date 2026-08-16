@@ -1,12 +1,13 @@
+#!/usr/bin/env python3
 """
-Content Rewriter — v2.0
+Content Rewriter — v2.1
 =======================
 Rewrites knowledge content to remove banned organizations and terms.
 Handles ALL banned organizations, not just FAO.
 Scans content, detects banned orgs, rewrites with African perspective.
 
 Previously: fao_rewriter.py (v1.0) — only handled FAO
-Now: content_rewriter.py (v2.0) — handles ALL banned orgs
+Now: content_rewriter.py (v2.1) — handles ALL banned orgs, CI-compatible
 """
 
 import os
@@ -32,6 +33,11 @@ GITHUB_API = "https://api.github.com"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 REQUEST_TIMEOUT = 90
+
+# CI / non-interactive mode
+CI_MODE = os.getenv("CI", "false").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+MAX_FILES = int(os.getenv("MAX_FILES", "10")) if os.getenv("MAX_FILES") else 10
 
 # ===========================================================================
 # Banned Organizations
@@ -347,13 +353,15 @@ def scan_and_rewrite_directory(path: str, dry_run: bool = True, max_files: int =
 def main():
     """Main entry point."""
     print("=" * 70)
-    print("Content Rewriter v2.0 — Banned Organization Cleanup")
+    print("Content Rewriter v2.1 — Banned Organization Cleanup")
     print("=" * 70)
     print(f"Banned orgs: {len(BANNED_ORGS)}")
     print(f"Banned terms: {len(BANNED_TERMS)}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"Repo: {KNOWLEDGE_REPO}")
+    print(f"CI Mode: {CI_MODE}")
+    print(f"DRY RUN: {DRY_RUN}")
     print("=" * 70)
 
     if not GH_TOKEN or not KNOWLEDGE_REPO:
@@ -364,16 +372,24 @@ def main():
         print("ERROR: No AI API keys configured")
         return
 
-    dry_run_input = input("\nDRY RUN? (y/n): ").strip().lower()
-    dry_run = dry_run_input == "y"
+    # Get settings from environment or interactive input
+    dry_run = DRY_RUN
+    max_files = MAX_FILES
 
-    max_files_input = input("Max files to rewrite (default 10, 0 for all): ").strip()
-    try:
-        max_files = int(max_files_input) if max_files_input else 10
-        if max_files == 0:
-            max_files = None
-    except ValueError:
-        max_files = 10
+    if not CI_MODE:
+        print("\n")
+        dry_run_input = input("DRY RUN? (y/n): ").strip().lower()
+        dry_run = dry_run_input == "y"
+
+        max_files_input = input("Max files to rewrite (default 10, 0 for all): ").strip()
+        try:
+            max_files = int(max_files_input) if max_files_input else 10
+            if max_files == 0:
+                max_files = None
+        except ValueError:
+            max_files = 10
+    else:
+        print(f"\n[CI Mode] DRY_RUN={dry_run}, MAX_FILES={max_files}")
 
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Scanning knowledge repo...")
     print(f"Max files: {max_files or 'ALL'}")
@@ -430,6 +446,10 @@ def main():
                 print(f"  [❌ FAILED] {f['path']}")
 
     print("=" * 70)
+
+    # Exit with error if files failed (so workflow can alert)
+    if total_results['failed'] > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
