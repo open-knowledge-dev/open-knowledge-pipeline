@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Thin Category AI Scraper for Ghana-GPT
-Focuses on underrepresented categories
+Thin Category AI Scraper for Focuses on underrepresented categories
 """
 
 import os
@@ -54,7 +53,7 @@ class ThinCategoryScraper:
         self.api_key = os.getenv("GROQ_API_KEY")
         self.base_url = "https://api.groq.com/openai/v1/chat/completions"
         self.model = "llama-3.3-70b-versatile"
-        self.training_form_url = os.getenv("TRAINING_FORM_URL", "https://training.ghana-gpt.com")
+        self.training_form_url = os.getenv("TRAINING_FORM_URL")
         self.scraper_key = os.getenv("SCRAPER_API_KEY")
         
         self.state_file = "thin_scraper_state.json"
