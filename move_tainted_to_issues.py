@@ -3,7 +3,7 @@
 Move Tainted Files to Issues — v1.0
 ====================================
 Scans all knowledge files for banned content.
-Moves tainted files to ghana-gpt-knowledge/issues/ folder.
+Moves tainted files to /issues/ folder.
 """
 
 import os
