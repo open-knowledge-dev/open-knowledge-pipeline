@@ -1,0 +1,36 @@
+name: Move Tainted Files to Issues
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  move-tainted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run move script
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
+          CI: true
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+        run: python move_tainted_to_issues.py
