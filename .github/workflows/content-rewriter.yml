@@ -1,4 +1,4 @@
-name: FAO Safety-Net Rewriter
+name: Content Rewriter — Banned Organization Cleanup
 
 on:
   schedule:
@@ -10,9 +10,13 @@ on:
         description: 'Maximum files to process'
         required: false
         default: '10'
+      dry_run:
+        description: 'Dry run (y/n)'
+        required: false
+        default: 'n'
 
 jobs:
-  fao-rewrite:
+  content-rewrite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     
@@ -26,21 +30,17 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: pip install requests psycopg2-binary
+        run: pip install requests
       
-      - name: Run FAO Rewriter
+      - name: Run Content Rewriter
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          NEON_URL: ${{ secrets.NEON_URL }}
-          FLY_PG_URL: ${{ secrets.FLY_PG_URL }}
-        run: python fao_rewriter.py
+        run: python content_rewriter.py
       
       - name: Summary
         run: |
-          echo "✅ FAO Rewriter complete."
-          echo "Check admin/fao-rewrite-audit.md for details."
+          echo "✅ Content Rewriter complete."
+          echo "All banned organizations (FAO, WHO, UN, World Bank, IMF, etc.) have been scanned and rewritten."
