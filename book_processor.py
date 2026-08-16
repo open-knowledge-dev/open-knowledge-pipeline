@@ -1,5 +1,5 @@
 """
-Book Processor — v2.0
+Book Processor — v2.1
 ======================
 Automatically downloads public domain books from Project Gutenberg,
 extracts text, splits into chunks, rewrites via Groq AI in
@@ -10,6 +10,8 @@ Zero copyright risk. Fully automated.
 
 Schedule: Runs daily. Processes one book per run.
 Resumes from where it left off if interrupted.
+- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
+- Updated to llama-3.3-70b-versatile
 """
 
 import os
@@ -45,6 +47,68 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 STATE_FILE_PATH = "admin/book-processor-state.json"
 MAX_CHUNKS_PER_RUN = 40
 MIN_CHUNK_LENGTH = 300
+
+
+# ===========================================================================
+# Banned Organizations — Never appear in generated content
+# ===========================================================================
+
+BANNED_ORGS = [
+    "FAO",
+    "Food and Agriculture Organization",
+    "WHO",
+    "World Health Organization",
+    "UN",
+    "United Nations",
+    "World Bank",
+    "IMF",
+    "International Monetary Fund",
+    "UNDP",
+    "UNESCO",
+    "UNICEF",
+    "USAID",
+    "DFID",
+    "GIZ",
+    "World Food Programme",
+    "WFP",
+    "International Labour Organization",
+    "ILO",
+    "World Trade Organization",
+    "WTO",
+    "African Development Bank",
+    "AfDB",
+    "European Union",
+    "EU"
+]
+
+BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
+BANNED_INSTRUCTION = (
+    f"IMPORTANT: Never mention or reference any of these organizations: {BANNED_ORGS_STRING}. "
+    "Focus entirely on local African perspectives without any external organizational framing. "
+    "Do not reference development programs, aid, or international interventions. "
+    "Write from the perspective of African knowledge systems only."
+)
+
+BANNED_TERMS = [
+    "development program", "aid program", "international assistance",
+    "foreign aid", "development agency", "grant", "funding", "NGO",
+    "non-governmental"
+]
+
+
+def _check_banned_content(text: str) -> bool:
+    """Check if content contains banned organizations or terms. Returns True if clean."""
+    text_lower = text.lower()
+    for org in BANNED_ORGS:
+        if org.lower() in text_lower:
+            print(f"  [Safety] Content contains banned organization: {org}")
+            return False
+    for term in BANNED_TERMS:
+        if term in text_lower:
+            print(f"  [Safety] Content contains banned term: {term}")
+            return False
+    return True
+
 
 # ===========================================================================
 # Public Domain Book List (Project Gutenberg IDs — all pre-1927)
@@ -101,10 +165,9 @@ def download_book(book_id: str) -> Optional[str]:
         try:
             print(f"  Downloading: {url}")
             sys.stdout.flush()
-            response = requests.get(url, timeout=60, headers={"User-Agent": "GhanaGPT-BookProcessor/2.0"})
+            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/2.1"})
             if response.status_code == 200:
                 text = response.text
-                # Clean Project Gutenberg header/footer
                 text = clean_gutenberg_text(text)
                 if len(text) > 10000:
                     print(f"  Downloaded {len(text)} chars")
@@ -117,7 +180,6 @@ def download_book(book_id: str) -> Optional[str]:
 
 def clean_gutenberg_text(text: str) -> str:
     """Remove Project Gutenberg header and footer boilerplate."""
-    # Remove header
     start_markers = [
         "*** START OF THE PROJECT GUTENBERG",
         "*** START OF THIS PROJECT GUTENBERG",
@@ -126,13 +188,11 @@ def clean_gutenberg_text(text: str) -> str:
     for marker in start_markers:
         idx = text.find(marker)
         if idx != -1:
-            # Find the end of the line
             newline = text.find("\n", idx)
             if newline != -1:
                 text = text[newline + 1:]
             break
 
-    # Remove footer
     end_markers = [
         "*** END OF THE PROJECT GUTENBERG",
         "*** END OF THIS PROJECT GUTENBERG",
@@ -153,7 +213,6 @@ def clean_gutenberg_text(text: str) -> str:
 
 def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
     """Split book text into manageable chunks for AI rewriting."""
-    # Split by paragraphs
     paragraphs = re.split(r'\n\s*\n', text)
     chunks = []
     current_chunk = []
@@ -163,11 +222,9 @@ def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
         para = para.strip()
         if not para:
             continue
-        # Skip very short lines (chapter titles, etc.)
         word_count = len(para.split())
 
         if word_count < 10 and len(para) < 100:
-            # Likely a chapter title — include as context
             if current_chunk:
                 chunks.append(" ".join(current_chunk))
                 current_chunk = []
@@ -185,7 +242,6 @@ def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
     if current_chunk:
         chunks.append(" ".join(current_chunk))
 
-    # Filter out short chunks
     chunks = [c for c in chunks if len(c.split()) >= 30]
     return chunks
 
@@ -205,7 +261,8 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
         "an elder sharing wisdom around a fire. Keep all facts, names, dates, and "
         "key details accurate. Add practical lessons and African context where relevant. "
         "Write in first person. Write at least 400 words. "
-        "Do NOT use markdown formatting. Write in plain text only."
+        "Do NOT use markdown formatting. Write in plain text only. "
+        + BANNED_INSTRUCTION
     )
 
     user_prompt = (
@@ -218,7 +275,7 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": "llama-3.3-70b-versatile",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -230,7 +287,10 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
     try:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            content = response.json()["choices"][0]["message"]["content"]
+            if not _check_banned_content(content):
+                return ""
+            return content
         return ""
     except Exception as e:
         print(f"    Groq error: {e}")
@@ -245,7 +305,8 @@ def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
     system_prompt = (
         "You are a wise African storyteller. Rewrite this passage in a warm, "
         "conversational voice. Keep facts accurate. Add African context. "
-        "Write at least 400 words. Plain text only."
+        "Write at least 400 words. Plain text only. "
+        + BANNED_INSTRUCTION
     )
     user_prompt = (
         f"From '{book_title}' by {book_author}:\n\n{chunk}\n\n"
@@ -266,7 +327,10 @@ def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
     try:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            content = response.json()["choices"][0]["message"]["content"]
+            if not _check_banned_content(content):
+                return ""
+            return content
         return ""
     except Exception as e:
         print(f"    Mistral error: {e}")
@@ -398,21 +462,20 @@ def save_state(state: Dict) -> bool:
 def run_book_processor():
     """Download and process one public domain book per run."""
     print("=" * 60)
-    print("Book Processor v2.0 — Project Gutenberg")
+    print("Book Processor v2.1 — Project Gutenberg")
     print("=" * 60)
     print(f"Max chunks per run: {MAX_CHUNKS_PER_RUN}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
+    print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
     sys.stdout.flush()
 
     if not GROQ_API_KEY and not MISTRAL_API_KEY:
         print("ERROR: No AI API keys configured.")
         return
 
-    # Load state
     state = load_state()
 
-    # Check if a book is already in progress
     current_book = state.get("current_book")
     chunks = state.get("chunks", [])
     current_index = state.get("current_index", 0)
@@ -421,7 +484,6 @@ def run_book_processor():
     if current_book and chunks and current_index < len(chunks):
         print(f"Resuming: {current_book['title']} (chunk {current_index + 1}/{len(chunks)})")
     else:
-        # Pick a new book
         available = [b for b in BOOK_LIST if b["id"] not in completed_books]
         if not available:
             print("All books processed! Resetting list.")
@@ -458,7 +520,6 @@ def run_book_processor():
         state["current_index"] = 0
         save_state(state)
 
-    # Process chunks
     max_in_run = min(MAX_CHUNKS_PER_RUN, len(chunks) - current_index)
     submission_count = 0
     failed_count = 0
@@ -474,7 +535,6 @@ def run_book_processor():
         chunk = chunks[i]
         print(f"\n[{i + 1}/{len(chunks)}] Chunk {i + 1} ({len(chunk.split())} words)")
 
-        # Rewrite
         knowledge = rewrite_chunk(chunk, current_book["title"], current_book["author"])
         if not knowledge:
             failed_count += 1
@@ -483,7 +543,13 @@ def run_book_processor():
             save_state(state)
             continue
 
-        # Clean markdown
+        if not _check_banned_content(knowledge):
+            failed_count += 1
+            print(f"  Failed: Content contains banned organizations")
+            state["current_index"] = i + 1
+            save_state(state)
+            continue
+
         knowledge = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', knowledge)
         knowledge = re.sub(r'^#{1,6}\s+', '', knowledge, flags=re.MULTILINE)
         knowledge = knowledge.strip()
@@ -495,13 +561,11 @@ def run_book_processor():
             save_state(state)
             continue
 
-        # Build topic
         topic = f"Wisdom from {current_book['title']} by {current_book['author']} — Part {i + 1}"
         print(f"  Topic: {topic[:80]}...")
         print(f"  Content: {len(knowledge)} chars")
         sys.stdout.flush()
 
-        # Submit
         success, sid = submit_to_form(topic, current_book["category"], knowledge)
         if success:
             submission_count += 1
@@ -510,17 +574,14 @@ def run_book_processor():
             failed_count += 1
             print(f"  ❌ Failed")
 
-        # Save progress
         state["current_index"] = i + 1
         save_state(state)
 
-        # Delay
         if i < current_index + max_in_run - 1:
             wait = SUBMISSION_DELAY + random.randint(1, 10)
             print(f"  Waiting {wait}s...")
             time.sleep(wait)
 
-    # Check if book is complete
     if state["current_index"] >= len(chunks):
         completed_books.append(current_book["id"])
         state["completed_books"] = completed_books
