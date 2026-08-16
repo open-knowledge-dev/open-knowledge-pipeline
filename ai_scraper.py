@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Knowledge Scraper for Ghana-GPT
+AI Knowledge Scraper for 
 Generates high-quality training data from AI models
 Uses Groq Llama 3.3 70B
 """
@@ -104,7 +104,7 @@ class AIKnowledgeScraper:
         self.api_key = os.getenv("GROQ_API_KEY")
         self.base_url = "https://api.groq.com/openai/v1/chat/completions"
         self.model = "llama-3.3-70b-versatile"
-        self.training_form_url = os.getenv("TRAINING_FORM_URL", "https://training.ghana-gpt.com")
+        self.training_form_url = os.getenv("TRAINING_FORM_URL")
         self.scraper_key = os.getenv("SCRAPER_API_KEY")
         
         self.state_file = "scraper_state.json"
