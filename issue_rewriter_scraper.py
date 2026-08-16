@@ -2,7 +2,7 @@
 """
 Issue Rewriter Scraper — v1.0
 ==============================
-Picks tainted files from ghana-gpt-knowledge/issues/
+Picks tainted files from /issues/
 Rewrites content (removes banned orgs)
 Submits to training form as new knowledge
 Deletes the original file after successful submission
