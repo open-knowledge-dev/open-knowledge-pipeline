@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
 """
-Move Tainted Files to Issues — v1.0
-====================================
-Scans all knowledge files for banned content.
-Moves tainted files to issues/ folder in the private repo.
+Move Tainted Files to Issues — Daily Scanner
+Scans all categories in the private repo for banned content.
+Moves tainted files to issues/ folder.
+Deletes the original after successful move.
 """
 
 import os
@@ -24,7 +23,7 @@ KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
 CI_MODE = os.getenv("CI", "false").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # ===========================================================================
 # Banned Organizations
@@ -49,6 +48,7 @@ BANNED_TERMS = [
     "foreign aid", "development agency", "grant", "funding", "NGO",
     "non-governmental"
 ]
+
 
 def build_banned_patterns() -> List[re.Pattern]:
     patterns = []
