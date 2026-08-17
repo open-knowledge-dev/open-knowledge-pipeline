@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry run (true/false)'
-        required: false
-        default: 'false'
 
 jobs:
   move-tainted:
@@ -32,5 +27,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
           CI: true
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: python move_tainted_to_issues.py
