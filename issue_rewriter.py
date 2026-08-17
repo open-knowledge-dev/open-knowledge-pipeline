@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter — v1.0
+Issue Rewriter — v2.0
 ======================
 Picks files from issues/ in the private repo.
 Rewrites content (removes banned orgs).
@@ -12,7 +12,6 @@ Runs daily — 27 files per run.
 import os
 import sys
 import re
-import json
 import base64
 import requests
 import time
@@ -35,10 +34,9 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 REQUEST_TIMEOUT = 90
-SUBMISSION_DELAY = 30
+RETRY_COUNT = 3
+RETRY_DELAY = 2
 
-CI_MODE = os.getenv("CI", "false").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 MAX_FILES = int(os.getenv("MAX_FILES", "27"))
 
 # ===========================================================================
@@ -68,9 +66,123 @@ BANNED_TERMS = [
 BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
 BANNED_TERMS_STRING = ", ".join(BANNED_TERMS)
 
+
+def build_banned_patterns() -> List[re.Pattern]:
+    patterns = []
+    for term in BANNED_ORGS:
+        if len(term) <= 3:
+            patterns.append(re.compile(rf'\b{re.escape(term)}\b', re.IGNORECASE))
+        else:
+            patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+    for term in BANNED_TERMS:
+        patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+    return patterns
+
+
+BANNED_PATTERNS = build_banned_patterns()
+
+
+def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
+    found = []
+    for pattern in BANNED_PATTERNS:
+        for match in pattern.finditer(text):
+            found.append(match.group(0))
+    found = list(set(found))
+    return len(found) > 0, found
+
+
+# ===========================================================================
+# GitHub Operations with Retry
+# ===========================================================================
+
+def _github_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
+    return headers
+
+
+def api_request(method: str, url: str, **kwargs) -> requests.Response:
+    for attempt in range(RETRY_COUNT):
+        try:
+            response = requests.request(
+                method, url,
+                headers=_github_headers(),
+                timeout=REQUEST_TIMEOUT,
+                **kwargs
+            )
+            if response.status_code in [200, 201]:
+                return response
+            if response.status_code == 404:
+                return response
+            if response.status_code == 403 and 'rate limit' in response.text.lower():
+                reset_time = response.headers.get('X-RateLimit-Reset', '')
+                if reset_time:
+                    wait_time = max(int(reset_time) - int(time.time()) + 10, 30)
+                    print(f"    Rate limit. Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                continue
+            if response.status_code >= 500:
+                print(f"    Server error {response.status_code}. Retry {attempt + 1}/{RETRY_COUNT}...")
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            return response
+        except requests.exceptions.RequestException as e:
+            print(f"    Request error: {e}. Retry {attempt + 1}/{RETRY_COUNT}...")
+            time.sleep(RETRY_DELAY * (attempt + 1))
+    return None
+
+
+def get_repo_contents(path: str) -> List[Dict]:
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        return response.json()
+    return []
+
+
+def get_file_content(path: str) -> Optional[str]:
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        data = response.json()
+        if data.get("content"):
+            return base64.b64decode(data["content"]).decode("utf-8")
+    return None
+
+
+def get_file_sha(path: str) -> Optional[str]:
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        return response.json().get("sha")
+    return None
+
+
+def delete_file(path: str, message: str) -> Tuple[bool, str]:
+    sha = get_file_sha(path)
+    if not sha:
+        return False, "Could not get file SHA"
+
+    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
+    payload = {
+        "message": message,
+        "sha": sha,
+        "branch": "main",
+    }
+    response = api_request("DELETE", url, json=payload)
+    if response and response.status_code == 200:
+        return True, "Deleted successfully"
+    return False, f"Delete failed: {response.status_code if response else 'No response'}"
+
+
+# ===========================================================================
+# AI Rewriting
+# ===========================================================================
+
 REWRITE_PROMPT = (
     f"You are an African knowledge expert. Rewrite the following content to "
-    f"REMOVE ALL references to international organizations and external entities.\n\n"
+    f"REMOVE ALL references to international organizations.\n\n"
     f"DO NOT mention: {BANNED_ORGS_STRING}\n"
     f"DO NOT mention: {BANNED_TERMS_STRING}\n\n"
     f"Rules:\n"
@@ -86,103 +198,6 @@ REWRITE_PROMPT = (
     f"10. IMPORTANT: Check your work. If you see ANY banned term, remove it."
 )
 
-# ===========================================================================
-# GitHub Operations
-# ===========================================================================
-
-def _github_headers() -> Dict[str, str]:
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if GH_TOKEN:
-        headers["Authorization"] = f"token {GH_TOKEN}"
-    return headers
-
-
-def get_repo_contents(path: str) -> List[Dict]:
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            return response.json()
-        return []
-    except Exception:
-        return []
-
-
-def get_file_content(path: str) -> Optional[str]:
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("content"):
-                return base64.b64decode(data["content"]).decode("utf-8")
-        return None
-    except Exception:
-        return None
-
-
-def get_file_sha(path: str) -> Optional[str]:
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            return response.json().get("sha")
-        return None
-    except Exception:
-        return None
-
-
-def delete_file(path: str, message: str) -> bool:
-    sha = get_file_sha(path)
-    if not sha:
-        return False
-
-    url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    payload = {
-        "message": message,
-        "sha": sha,
-        "branch": "main",
-    }
-
-    try:
-        response = requests.delete(url, json=payload, headers=_github_headers(), timeout=30)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-
-# ===========================================================================
-# Content Detection
-# ===========================================================================
-
-def build_banned_patterns() -> List[re.Pattern]:
-    patterns = []
-    for term in BANNED_ORGS:
-        if len(term) <= 3:
-            patterns.append(re.compile(rf'\b{re.escape(term)}\b', re.IGNORECASE))
-        else:
-            patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
-    for term in BANNED_TERMS:
-        patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
-    return patterns
-
-BANNED_PATTERNS = build_banned_patterns()
-
-
-def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
-    found = []
-    for pattern in BANNED_PATTERNS:
-        if pattern.search(text):
-            match = pattern.search(text)
-            if match:
-                found.append(match.group(0))
-    found = list(set(found))
-    return len(found) > 0, found
-
-
-# ===========================================================================
-# AI Rewriting
-# ===========================================================================
 
 def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
     if not GROQ_API_KEY:
@@ -190,10 +205,7 @@ def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
 
     extra = ""
     if attempt > 0:
-        extra = (
-            f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. "
-            f"Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}."
-        )
+        extra = f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}."
 
     system_prompt = REWRITE_PROMPT + extra
 
@@ -217,9 +229,10 @@ def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
+        print(f"    Groq error: {response.status_code}")
         return None
     except Exception as e:
-        print(f"  Groq error: {e}")
+        print(f"    Groq exception: {e}")
         return None
 
 
@@ -253,13 +266,14 @@ def rewrite_with_mistral(content: str, attempt: int = 0) -> Optional[str]:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
+        print(f"    Mistral error: {response.status_code}")
         return None
     except Exception as e:
-        print(f"  Mistral error: {e}")
+        print(f"    Mistral exception: {e}")
         return None
 
 
-def rewrite_content(content: str) -> Optional[str]:
+def rewrite_content(content: str) -> Tuple[Optional[str], str]:
     max_retries = 3
     current_content = content
 
@@ -281,12 +295,12 @@ def rewrite_content(content: str) -> Optional[str]:
 
         has_banned, found = detect_banned_content(rewritten)
         if not has_banned:
-            return rewritten
+            return rewritten, ""
 
         print(f"    ⚠️ Attempt {attempt + 1} still has: {', '.join(found[:3])}")
         current_content = rewritten
 
-    return None
+    return None, f"Failed to remove banned content after {max_retries} attempts"
 
 
 # ===========================================================================
@@ -298,17 +312,20 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str = "E
     try:
         form_response = session.get(TRAINING_FORM_URL, timeout=REQUEST_TIMEOUT)
         if form_response.status_code != 200:
-            return False, ""
+            return False, f"Form returned {form_response.status_code}"
+
         html = form_response.text
 
         csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
         if not csrf_match:
-            return False, ""
+            return False, "Could not find CSRF token"
+
         csrf_token = csrf_match.group(1)
 
         code_match = re.search(r'verification-code[^>]*>(\d{6})<', html)
         if not code_match:
-            return False, ""
+            return False, "Could not find verification code"
+
         verification_code = code_match.group(1)
 
         submit_data = {
@@ -335,17 +352,88 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str = "E
             id_match = re.search(r'GHGPT-\d{4}-\d{4}', submit_response.text)
             submission_id = id_match.group(0) if id_match else "unknown"
             return True, submission_id
-        return False, ""
+
+        return False, f"Submit failed: {submit_response.status_code}"
+
     except Exception as e:
-        print(f"  Submission error: {e}")
-        return False, ""
+        return False, f"Submission error: {e}"
 
 
 # ===========================================================================
-# Main
+# Main Logic
 # ===========================================================================
 
-def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
+def extract_info_from_filename(filename: str) -> Tuple[str, str]:
+    """Extract topic and category from filename."""
+    # Remove .md extension
+    name = filename.replace(".md", "")
+
+    # Split by -
+    parts = name.split("-")
+
+    # Skip date parts (first 3-4 parts are YYYYMMDD-HHMMSS-ID)
+    # Keep only meaningful words
+    meaningful = []
+    for p in parts:
+        # Skip if it looks like a date (8 digits) or time (6 digits) or ID (4 digits)
+        if re.match(r'^\d{8}$', p):
+            continue
+        if re.match(r'^\d{6}$', p):
+            continue
+        if re.match(r'^\d{4}$', p):
+            continue
+        meaningful.append(p)
+
+    topic = " ".join(meaningful).replace("_", " ").title()
+    if not topic or len(topic) < 5:
+        topic = "Knowledge from Community Sources"
+
+    # Determine category from filename
+    category = "Other"
+    category_map = {
+        "agriculture": "Agriculture & Farming",
+        "farming": "Agriculture & Farming",
+        "business": "Business & Finance",
+        "finance": "Business & Finance",
+        "culture": "Culture & Traditions",
+        "education": "Education & Learning",
+        "learning": "Education & Learning",
+        "health": "Health & Medicine",
+        "medicine": "Health & Medicine",
+        "tech": "Technology & Innovation",
+        "technology": "Technology & Innovation",
+        "innovation": "Technology & Innovation",
+        "tourism": "Tourism & Travel",
+        "travel": "Tourism & Travel",
+        "history": "History & Heritage",
+        "heritage": "History & Heritage",
+        "food": "Food & Cuisine",
+        "cuisine": "Food & Cuisine",
+        "music": "Music & Dance",
+        "dance": "Music & Dance",
+        "language": "Language & Proverbs",
+        "religion": "Religion & Spirituality",
+        "sports": "Sports & Games",
+        "fashion": "Fashion & Textiles",
+        "environment": "Environment & Nature",
+        "governance": "Governance & Leadership",
+        "leadership": "Governance & Leadership",
+        "family": "Family & Relationships",
+        "arts": "Arts & Crafts",
+        "science": "Science & Innovation",
+    }
+
+    lower_name = name.lower()
+    for key, value in category_map.items():
+        if key in lower_name:
+            category = value
+            break
+
+    return topic, category
+
+
+def process_file(file_path: str) -> Dict:
+    """Process a single file from issues/."""
     result = {
         "file": file_path,
         "status": "unknown",
@@ -355,85 +443,88 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
 
     print(f"\n  Processing: {file_path}")
 
+    # Read content
     content = get_file_content(file_path)
     if not content:
         result["status"] = "error"
         result["error"] = "Could not read file"
         return result
 
-    category = "Other"
-    for cat in ["agriculture", "business", "culture", "education", "health",
-                "technology", "tourism", "history", "food", "music",
-                "language", "religion", "sports", "fashion", "environment",
-                "governance", "family", "arts", "science"]:
-        if cat in file_path.lower():
-            category = cat.title().replace("_", " & ")
-            break
-
+    # Extract info from filename
     filename = file_path.split("/")[-1]
-    topic_parts = filename.replace(".md", "").split("-")
-    topic_parts = [p for p in topic_parts if not re.match(r'^\d{8}$', p) and not re.match(r'^\d{4}$', p)]
-    topic = " ".join(topic_parts).replace("_", " ").title()
-    if not topic or len(topic) < 5:
-        topic = "Knowledge from Community Sources"
+    topic, category = extract_info_from_filename(filename)
 
     print(f"    Topic: {topic[:60]}...")
     print(f"    Category: {category}")
 
-    if dry_run:
-        print(f"    [DRY RUN] Would rewrite and submit")
-        result["status"] = "dry_run"
-        return result
-
-    rewritten = rewrite_content(content)
+    # Rewrite content
+    rewritten, error = rewrite_content(content)
     if not rewritten:
         result["status"] = "error"
-        result["error"] = "Failed to rewrite after 3 attempts"
+        result["error"] = error
         return result
 
+    # Check length
     if len(rewritten.split()) < 300:
         result["status"] = "error"
-        result["error"] = "Rewritten content too short"
+        result["error"] = f"Rewritten content too short: {len(rewritten.split())} words"
         return result
 
-    success, submission_id = submit_to_form(topic, category, rewritten, "English")
+    # Submit to training form
+    success, msg = submit_to_form(topic, category, rewritten, "English")
 
     if not success:
         result["status"] = "error"
-        result["error"] = "Submission failed"
+        result["error"] = msg
         return result
 
-    result["submission_id"] = submission_id
-    print(f"    ✅ Submitted! ID: {submission_id}")
+    result["submission_id"] = msg
+    print(f"    ✅ Submitted! ID: {msg}")
 
-    if delete_file(file_path, f"Rewritten and submitted: {submission_id}"):
+    # Delete original file
+    success, msg = delete_file(file_path, f"Rewritten and submitted: {msg}")
+    if success:
         result["status"] = "completed"
-        print(f"    ✅ Original file deleted from issues/")
+        print(f"    ✅ Original file deleted")
     else:
         result["status"] = "submitted_but_not_deleted"
-        result["error"] = "File not deleted after submission"
+        result["error"] = msg
+        print(f"    ⚠️ {msg}")
 
     return result
 
 
 def main():
+    """Main entry point."""
     print("=" * 70)
-    print("Issue Rewriter v1.0")
+    print("Issue Rewriter v2.0")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"DRY RUN: {DRY_RUN}")
     print(f"Max files: {MAX_FILES}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
+    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print("=" * 70)
 
-    if not GH_TOKEN or not KNOWLEDGE_REPO:
-        print("ERROR: GitHub credentials not configured")
+    # Validate configuration
+    missing = []
+    if not GH_TOKEN:
+        missing.append("GH_TOKEN")
+    if not KNOWLEDGE_REPO:
+        missing.append("KNOWLEDGE_REPO")
+    if not TRAINING_FORM_URL:
+        missing.append("TRAINING_FORM_URL")
+    if not SCRAPER_API_KEY:
+        missing.append("SCRAPER_API_KEY")
+
+    if missing:
+        print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
 
     if not GROQ_API_KEY and not MISTRAL_API_KEY:
-        print("ERROR: No AI API keys configured")
+        print("ERROR: No AI API keys configured (GROQ_API_KEY or MISTRAL_API_KEY)")
         sys.exit(1)
 
+    # Get files from issues/
     issues = get_repo_contents("issues")
     if not issues:
         print("No files in issues/ folder.")
@@ -453,27 +544,27 @@ def main():
         "processed": 0,
         "completed": 0,
         "failed": 0,
-        "dry_run": 0,
-        "details": []
+        "errors": []
     }
 
     for i, file_info in enumerate(md_files[:MAX_FILES]):
         file_path = file_info["path"]
-        result = process_issue_file(file_path, DRY_RUN)
+        result = process_file(file_path)
         results["processed"] += 1
 
-        if result["status"] == "dry_run":
-            results["dry_run"] += 1
-        elif result["status"] == "completed":
+        if result["status"] == "completed":
             results["completed"] += 1
         else:
             results["failed"] += 1
+            results["errors"].append({
+                "file": file_path,
+                "error": result.get("error", "Unknown error")
+            })
 
-        results["details"].append(result)
-
+        # Wait between files
         if i < len(md_files[:MAX_FILES]) - 1:
-            print(f"  Waiting {SUBMISSION_DELAY}s...")
-            time.sleep(SUBMISSION_DELAY)
+            print(f"  Waiting 30s...")
+            time.sleep(30)
 
     print("\n" + "=" * 70)
     print("SUMMARY")
@@ -481,20 +572,16 @@ def main():
     print(f"Files processed: {results['processed']}")
     print(f"Completed (rewritten + submitted + deleted): {results['completed']}")
     print(f"Failed: {results['failed']}")
-    print(f"Dry run: {results['dry_run']}")
 
-    if results["details"]:
-        print("\nDetails:")
-        for r in results["details"]:
-            status = r["status"]
-            if status == "completed":
-                print(f"  ✅ {r['file']} → {r.get('submission_id', 'unknown')}")
-            elif status == "dry_run":
-                print(f"  🔄 {r['file']} [DRY RUN]")
-            else:
-                print(f"  ❌ {r['file']} — {r.get('error', 'unknown')}")
+    if results["errors"]:
+        print("\nErrors:")
+        for error in results["errors"]:
+            print(f"  ❌ {error['file']}: {error['error']}")
 
     print("=" * 70)
+
+    if results["failed"] > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
