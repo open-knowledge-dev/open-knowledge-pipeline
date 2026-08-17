@@ -1,16 +1,19 @@
+#!/usr/bin/env python3
 """
-Move Tainted Files to Issues — Daily Scanner
+Move Tainted Files to Issues — v2.0
+====================================
 Scans all categories in the private repo for banned content.
 Moves tainted files to issues/ folder.
 Deletes the original after successful move.
+Runs daily at 4:00 AM UTC.
 """
 
 import os
 import sys
 import re
-import json
 import base64
 import requests
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
@@ -21,9 +24,9 @@ from typing import Optional, List, Dict, Tuple
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
-
-CI_MODE = os.getenv("CI", "false").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+REQUEST_TIMEOUT = 60
+RETRY_COUNT = 3
+RETRY_DELAY = 2
 
 # ===========================================================================
 # Banned Organizations
@@ -61,22 +64,22 @@ def build_banned_patterns() -> List[re.Pattern]:
         patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
     return patterns
 
+
 BANNED_PATTERNS = build_banned_patterns()
 
 
 def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
+    """Detect banned organizations in text. Returns (has_banned, found_list)."""
     found = []
     for pattern in BANNED_PATTERNS:
-        if pattern.search(text):
-            match = pattern.search(text)
-            if match:
-                found.append(match.group(0))
+        for match in pattern.finditer(text):
+            found.append(match.group(0))
     found = list(set(found))
     return len(found) > 0, found
 
 
 # ===========================================================================
-# GitHub Operations
+# GitHub Operations with Retry
 # ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
@@ -86,59 +89,81 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 
+def api_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Make API request with retry logic."""
+    for attempt in range(RETRY_COUNT):
+        try:
+            response = requests.request(
+                method, url,
+                headers=_github_headers(),
+                timeout=REQUEST_TIMEOUT,
+                **kwargs
+            )
+            if response.status_code in [200, 201]:
+                return response
+            if response.status_code == 404:
+                return response
+            if response.status_code == 403 and 'rate limit' in response.text.lower():
+                reset_time = response.headers.get('X-RateLimit-Reset', '')
+                if reset_time:
+                    wait_time = max(int(reset_time) - int(time.time()) + 10, 30)
+                    print(f"    Rate limit. Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                continue
+            if response.status_code >= 500:
+                print(f"    Server error {response.status_code}. Retry {attempt + 1}/{RETRY_COUNT}...")
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            return response
+        except requests.exceptions.RequestException as e:
+            print(f"    Request error: {e}. Retry {attempt + 1}/{RETRY_COUNT}...")
+            time.sleep(RETRY_DELAY * (attempt + 1))
+    return None
+
+
 def get_repo_contents(path: str) -> List[Dict]:
+    """Get contents of a directory in the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            return response.json()
-        return []
-    except Exception as e:
-        print(f"  Error getting contents: {e}")
-        return []
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        return response.json()
+    return []
 
 
 def get_file_content(path: str) -> Optional[str]:
+    """Get content of a file from the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("content"):
-                return base64.b64decode(data["content"]).decode("utf-8")
-        return None
-    except Exception as e:
-        print(f"  Error getting file: {e}")
-        return None
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        data = response.json()
+        if data.get("content"):
+            return base64.b64decode(data["content"]).decode("utf-8")
+    return None
 
 
 def get_file_sha(path: str) -> Optional[str]:
+    """Get SHA of a file from the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
-    try:
-        response = requests.get(url, headers=_github_headers(), timeout=30)
-        if response.status_code == 200:
-            return response.json().get("sha")
-        return None
-    except Exception:
-        return None
+    response = api_request("GET", url)
+    if response and response.status_code == 200:
+        return response.json().get("sha")
+    return None
 
 
 def create_file(path: str, content: str, message: str) -> bool:
+    """Create a new file in the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     payload = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
         "branch": "main",
     }
-    try:
-        response = requests.put(url, json=payload, headers=_github_headers(), timeout=30)
-        return response.status_code in [200, 201]
-    except Exception as e:
-        print(f"  Error creating file: {e}")
-        return False
+    response = api_request("PUT", url, json=payload)
+    return response is not None and response.status_code in [200, 201]
 
 
 def delete_file(path: str, message: str) -> bool:
+    """Delete a file from the knowledge repo."""
     sha = get_file_sha(path)
     if not sha:
         return False
@@ -149,43 +174,37 @@ def delete_file(path: str, message: str) -> bool:
         "sha": sha,
         "branch": "main",
     }
-
-    try:
-        response = requests.delete(url, json=payload, headers=_github_headers(), timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"  Error deleting file: {e}")
-        return False
+    response = api_request("DELETE", url, json=payload)
+    return response is not None and response.status_code == 200
 
 
-def move_file(source_path: str, dest_path: str, dry_run: bool = True) -> bool:
-    if dry_run:
-        return True
-
+def move_file(source_path: str, dest_path: str) -> Tuple[bool, str]:
+    """Move a file by copying then deleting the original."""
     content = get_file_content(source_path)
     if not content:
-        return False
+        return False, "Could not read source file"
 
     if not create_file(dest_path, content, f"Move tainted file: {source_path}"):
-        return False
+        return False, "Could not create destination file"
 
     if not delete_file(source_path, f"Moved to issues/: {dest_path}"):
-        return False
+        return False, "Could not delete source file"
 
-    return True
+    return True, "Moved successfully"
 
 
 # ===========================================================================
-# Scan and Move
+# Main Logic
 # ===========================================================================
 
-def scan_and_move_directory(path: str, dry_run: bool = True, issues_path: str = "issues") -> Dict:
+def process_category(path: str) -> Dict:
+    """Process a single category directory."""
     results = {
         "scanned": 0,
         "found_banned": 0,
         "moved": 0,
         "failed": 0,
-        "files": []
+        "errors": []
     }
 
     items = get_repo_contents(path)
@@ -198,13 +217,11 @@ def scan_and_move_directory(path: str, dry_run: bool = True, issues_path: str = 
             if item["name"] == "issues":
                 continue
             print(f"  Scanning subdirectory: {item['name']}")
-            sub_results = scan_and_move_directory(
-                f"{path}/{item['name']}", dry_run, issues_path
-            )
+            sub_results = process_category(f"{path}/{item['name']}")
             for key in results:
-                if key != "files":
+                if key != "errors":
                     results[key] += sub_results.get(key, 0)
-            results["files"].extend(sub_results.get("files", []))
+            results["errors"].extend(sub_results.get("errors", []))
             continue
 
         if not item.get("name", "").endswith(".md"):
@@ -229,45 +246,35 @@ def scan_and_move_directory(path: str, dry_run: bool = True, issues_path: str = 
         print(f"    ⚠️ Found banned content: {', '.join(found[:5])}")
 
         filename = item["name"]
-        dest_path = f"{issues_path}/{filename}"
+        dest_path = f"issues/{filename}"
 
-        if dry_run:
-            print(f"    [DRY RUN] Would move to: {dest_path}")
-            results["files"].append({
-                "source": file_path,
-                "dest": dest_path,
-                "found": found,
-                "action": "would_move"
-            })
-            continue
-
-        if move_file(file_path, dest_path, dry_run):
+        success, message = move_file(file_path, dest_path)
+        if success:
             results["moved"] += 1
-            results["files"].append({
-                "source": file_path,
-                "dest": dest_path,
-                "found": found,
-                "action": "moved"
-            })
             print(f"    ✅ Moved to: {dest_path}")
         else:
             results["failed"] += 1
-            print(f"    ❌ Failed to move")
+            error_msg = f"{file_path}: {message}"
+            results["errors"].append(error_msg)
+            print(f"    ❌ {message}")
 
     return results
 
 
 def main():
+    """Main entry point."""
     print("=" * 70)
-    print("Move Tainted Files to Issues v1.0")
+    print("Move Tainted Files to Issues v2.0")
     print("=" * 70)
     print(f"Banned orgs: {len(BANNED_ORGS)}")
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"DRY RUN: {DRY_RUN}")
+    print(f"CI Mode: {os.getenv('CI', 'false')}")
     print("=" * 70)
 
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         print("ERROR: GitHub credentials not configured")
+        print("  GH_TOKEN: " + ("SET" if GH_TOKEN else "MISSING"))
+        print("  KNOWLEDGE_REPO: " + ("SET" if KNOWLEDGE_REPO else "MISSING"))
         sys.exit(1)
 
     categories = [
@@ -285,7 +292,7 @@ def main():
         "found_banned": 0,
         "moved": 0,
         "failed": 0,
-        "files": []
+        "errors": []
     }
 
     print("\nScanning all categories...\n")
@@ -293,11 +300,11 @@ def main():
 
     for category in categories:
         print(f"\n--- Scanning {category} ---")
-        results = scan_and_move_directory(category, DRY_RUN)
+        results = process_category(category)
         for key in total_results:
-            if key != "files":
+            if key != "errors":
                 total_results[key] += results.get(key, 0)
-        total_results["files"].extend(results.get("files", []))
+        total_results["errors"].extend(results.get("errors", []))
 
     print("\n" + "=" * 70)
     print("SUMMARY")
@@ -307,14 +314,10 @@ def main():
     print(f"Files moved to issues/: {total_results['moved']}")
     print(f"Files failed: {total_results['failed']}")
 
-    if total_results["files"]:
-        print("\nFile list:")
-        for f in total_results["files"]:
-            action = f.get("action", "unknown")
-            if action == "would_move":
-                print(f"  [DRY RUN] {f['source']} → {f['dest']}")
-            elif action == "moved":
-                print(f"  [MOVED] {f['source']} → {f['dest']}")
+    if total_results["errors"]:
+        print("\nErrors:")
+        for error in total_results["errors"]:
+            print(f"  ❌ {error}")
 
     print("=" * 70)
 
