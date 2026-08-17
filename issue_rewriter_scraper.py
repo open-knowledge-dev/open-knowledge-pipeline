@@ -2,10 +2,11 @@
 """
 Issue Rewriter — v1.0
 ======================
-Picks tainted files from issues/
-Rewrites content (removes banned orgs)
-Submits to training form as new knowledge
-Deletes the original file after successful submission
+Picks files from issues/ in the private repo.
+Rewrites content (removes banned orgs).
+Submits to training form as new knowledge.
+Deletes the original file after successful submission.
+Runs daily — 27 files per run.
 """
 
 import os
@@ -37,8 +38,8 @@ REQUEST_TIMEOUT = 90
 SUBMISSION_DELAY = 30
 
 CI_MODE = os.getenv("CI", "false").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-MAX_FILES = int(os.getenv("MAX_FILES", "5")) if os.getenv("MAX_FILES") else 5
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+MAX_FILES = int(os.getenv("MAX_FILES", "27"))
 
 # ===========================================================================
 # Banned Organizations
@@ -407,7 +408,7 @@ def process_issue_file(file_path: str, dry_run: bool = True) -> Dict:
 
     if delete_file(file_path, f"Rewritten and submitted: {submission_id}"):
         result["status"] = "completed"
-        print(f"    ✅ Original file deleted")
+        print(f"    ✅ Original file deleted from issues/")
     else:
         result["status"] = "submitted_but_not_deleted"
         result["error"] = "File not deleted after submission"
