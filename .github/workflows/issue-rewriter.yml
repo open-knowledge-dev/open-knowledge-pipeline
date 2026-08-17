@@ -4,15 +4,6 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry run (true/false)'
-        required: false
-        default: 'false'
-      max_files:
-        description: 'Maximum files to process'
-        required: false
-        default: '27'
 
 jobs:
   rewrite-issues:
@@ -40,6 +31,5 @@ jobs:
           TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           CI: true
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          MAX_FILES: ${{ github.event.inputs.max_files || '27' }}
+          MAX_FILES: 27
         run: python issue_rewriter.py
