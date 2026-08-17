@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter — v2.1
+Issue Rewriter — v3.0
 ======================
 Picks files from issues/ in the private repo.
-Rewrites content (removes banned orgs).
+Rewrites content using Cloudflare Workers AI (removes banned orgs).
 Submits to training form as new knowledge.
 Deletes the original file after successful submission.
-Runs daily — 5 files per run to avoid Groq rate limits.
+Runs daily — 27 files per run.
 """
 
 import os
@@ -22,22 +22,23 @@ from typing import Optional, List, Dict, Tuple
 # Configuration
 # ===========================================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
+CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
+
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
 GITHUB_API = "https://api.github.com"
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 
 REQUEST_TIMEOUT = 90
 RETRY_COUNT = 3
 RETRY_DELAY = 2
 
-MAX_FILES = int(os.getenv("MAX_FILES", "5"))
+MAX_FILES = int(os.getenv("MAX_FILES", "27"))
 
 # ===========================================================================
 # Banned Organizations
@@ -177,7 +178,7 @@ def delete_file(path: str, message: str) -> Tuple[bool, str]:
 
 
 # ===========================================================================
-# AI Rewriting with Rate Limit Handling
+# Cloudflare AI Rewriting
 # ===========================================================================
 
 REWRITE_PROMPT = (
@@ -199,8 +200,8 @@ REWRITE_PROMPT = (
 )
 
 
-def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
-    if not GROQ_API_KEY:
+def rewrite_with_cloudflare(content: str, attempt: int = 0) -> Optional[str]:
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return None
 
     extra = ""
@@ -214,74 +215,39 @@ def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
 
     user_prompt = f"Rewrite this content. Remove ALL banned organizations and terms:\n\n{content}"
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
-        "model": "llama-3.3-70b-versatile",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.4,
         "max_tokens": 4000,
+        "temperature": 0.4,
     }
 
     try:
-        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.post(CLOUDFLARE_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            data = response.json()
+            if data.get("success"):
+                return data.get("result", {}).get("response", "")
+            else:
+                print(f"    Cloudflare API error: {data.get('errors', 'Unknown error')}")
+                return None
         elif response.status_code == 429:
-            wait_time = (attempt + 1) * 60
-            print(f"    Groq rate limit. Waiting {wait_time}s...")
+            wait_time = (attempt + 1) * 30
+            print(f"    Cloudflare rate limit. Waiting {wait_time}s...")
             time.sleep(wait_time)
             return None
         else:
-            print(f"    Groq error: {response.status_code}")
+            print(f"    Cloudflare error: {response.status_code}")
             return None
     except Exception as e:
-        print(f"    Groq exception: {e}")
-        return None
-
-
-def rewrite_with_mistral(content: str, attempt: int = 0) -> Optional[str]:
-    if not MISTRAL_API_KEY:
-        return None
-
-    extra = ""
-    if attempt > 0:
-        extra = f"\n\nPREVIOUS ATTEMPT FAILED. Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}."
-
-    system_prompt = REWRITE_PROMPT + extra
-
-    if len(content) > 8000:
-        content = content[:8000]
-
-    user_prompt = f"Rewrite this content. Remove ALL banned organizations and terms:\n\n{content}"
-
-    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "mistral-small-latest",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.4,
-        "max_tokens": 4000,
-    }
-
-    try:
-        response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        elif response.status_code == 429:
-            wait_time = (attempt + 1) * 60
-            print(f"    Mistral rate limit. Waiting {wait_time}s...")
-            time.sleep(wait_time)
-            return None
-        else:
-            print(f"    Mistral error: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"    Mistral exception: {e}")
+        print(f"    Cloudflare exception: {e}")
         return None
 
 
@@ -290,12 +256,7 @@ def rewrite_content(content: str) -> Tuple[Optional[str], str]:
     current_content = content
 
     for attempt in range(max_retries):
-        rewritten = None
-
-        if GROQ_API_KEY:
-            rewritten = rewrite_with_groq(current_content, attempt)
-        elif MISTRAL_API_KEY:
-            rewritten = rewrite_with_mistral(current_content, attempt)
+        rewritten = rewrite_with_cloudflare(current_content, attempt)
 
         if not rewritten:
             continue
@@ -493,12 +454,12 @@ def process_file(file_path: str) -> Dict:
 
 def main():
     print("=" * 70)
-    print("Issue Rewriter v2.1")
+    print("Issue Rewriter v3.0 — Cloudflare AI")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"Max files: {MAX_FILES}")
-    print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
-    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
+    print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
+    print(f"Model: {CLOUDFLARE_MODEL}")
     print("=" * 70)
 
     missing = []
@@ -510,13 +471,11 @@ def main():
         missing.append("TRAINING_FORM_URL")
     if not SCRAPER_API_KEY:
         missing.append("SCRAPER_API_KEY")
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        missing.append("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")
 
     if missing:
         print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
-
-    if not GROQ_API_KEY and not MISTRAL_API_KEY:
-        print("ERROR: No AI API keys configured (GROQ_API_KEY or MISTRAL_API_KEY)")
         sys.exit(1)
 
     issues = get_repo_contents("issues")
@@ -556,8 +515,8 @@ def main():
             })
 
         if i < len(md_files[:MAX_FILES]) - 1:
-            print(f"  Waiting 30s...")
-            time.sleep(30)
+            print(f"  Waiting 10s...")
+            time.sleep(10)
 
     print("\n" + "=" * 70)
     print("SUMMARY")
