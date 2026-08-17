@@ -31,5 +31,5 @@ jobs:
           TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           CI: true
-          MAX_FILES: 27
+          MAX_FILES: 5
         run: python issue_rewriter.py
