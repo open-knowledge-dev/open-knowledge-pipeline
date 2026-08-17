@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter — v3.0
+Issue Rewriter — v3.1
 ======================
 Picks files from issues/ in the private repo.
 Rewrites content using Cloudflare Workers AI (removes banned orgs).
+Uses AGGRESSIVE rewrite prompt to delete banned content.
 Submits to training form as new knowledge.
 Deletes the original file after successful submission.
 Runs daily — 27 files per run.
@@ -34,7 +35,7 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 GITHUB_API = "https://api.github.com"
 CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 
-REQUEST_TIMEOUT = 90
+REQUEST_TIMEOUT = 120
 RETRY_COUNT = 3
 RETRY_DELAY = 2
 
@@ -61,7 +62,7 @@ BANNED_ORGS = [
 BANNED_TERMS = [
     "development program", "aid program", "international assistance",
     "foreign aid", "development agency", "grant", "funding", "NGO",
-    "non-governmental"
+    "non-governmental", "donor", "beneficiary", "recipient"
 ]
 
 BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
@@ -178,25 +179,21 @@ def delete_file(path: str, message: str) -> Tuple[bool, str]:
 
 
 # ===========================================================================
-# Cloudflare AI Rewriting
+# Cloudflare AI Rewriting — AGGRESSIVE
 # ===========================================================================
 
 REWRITE_PROMPT = (
-    f"You are an African knowledge expert. Rewrite the following content to "
-    f"REMOVE ALL references to international organizations.\n\n"
-    f"DO NOT mention: {BANNED_ORGS_STRING}\n"
-    f"DO NOT mention: {BANNED_TERMS_STRING}\n\n"
-    f"Rules:\n"
-    f"1. Remove every mention of the above organizations and terms\n"
-    f"2. Replace 'according to WHO' → 'according to local experts'\n"
-    f"3. Replace 'UN program' → 'community program'\n"
-    f"4. Replace 'World Bank' → 'regional initiative'\n"
-    f"5. Remove 'funding', 'grant', 'NGO' entirely\n"
-    f"6. Present all information as African knowledge from local communities\n"
-    f"7. Keep all factual information intact\n"
-    f"8. Write in plain text. No markdown.\n"
-    f"9. At least 400 words.\n"
-    f"10. IMPORTANT: Check your work. If you see ANY banned term, remove it."
+    f"You are an African knowledge expert. Rewrite the following content.\n\n"
+    f"STRICT RULES:\n"
+    f"1. DELETE any sentence that mentions: {BANNED_ORGS_STRING}\n"
+    f"2. DELETE any sentence that mentions: {BANNED_TERMS_STRING}\n"
+    f"3. Do NOT replace them — DELETE them entirely\n"
+    f"4. If a paragraph has 3 or more banned terms, delete the whole paragraph\n"
+    f"5. Rewrite the remaining content to flow naturally\n"
+    f"6. Add African cultural context and local knowledge\n"
+    f"7. Write at least 400 words\n"
+    f"8. Plain text only — no markdown\n"
+    f"9. IMPORTANT: After writing, check your work. If you see ANY banned term, you have failed."
 )
 
 
@@ -206,14 +203,14 @@ def rewrite_with_cloudflare(content: str, attempt: int = 0) -> Optional[str]:
 
     extra = ""
     if attempt > 0:
-        extra = f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. Rewrite AGAIN. Remove ALL references to: {BANNED_ORGS_STRING}."
+        extra = f"\n\nPREVIOUS ATTEMPT FAILED. You still included banned terms. DELETE them. Do NOT keep any sentence with banned terms."
 
     system_prompt = REWRITE_PROMPT + extra
 
     if len(content) > 8000:
         content = content[:8000]
 
-    user_prompt = f"Rewrite this content. Remove ALL banned organizations and terms:\n\n{content}"
+    user_prompt = f"Rewrite this content. DELETE all banned organizations and terms:\n\n{content}"
 
     headers = {
         "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
@@ -225,8 +222,8 @@ def rewrite_with_cloudflare(content: str, attempt: int = 0) -> Optional[str]:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": 4000,
-        "temperature": 0.4,
+        "max_tokens": 4500,
+        "temperature": 0.3,
     }
 
     try:
@@ -252,7 +249,7 @@ def rewrite_with_cloudflare(content: str, attempt: int = 0) -> Optional[str]:
 
 
 def rewrite_content(content: str) -> Tuple[Optional[str], str]:
-    max_retries = 3
+    max_retries = 4
     current_content = content
 
     for attempt in range(max_retries):
@@ -454,7 +451,7 @@ def process_file(file_path: str) -> Dict:
 
 def main():
     print("=" * 70)
-    print("Issue Rewriter v3.0 — Cloudflare AI")
+    print("Issue Rewriter v3.1 — Cloudflare AI (Aggressive)")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"Max files: {MAX_FILES}")
