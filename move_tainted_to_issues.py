@@ -69,7 +69,6 @@ BANNED_PATTERNS = build_banned_patterns()
 
 
 def detect_banned_content(text: str) -> Tuple[bool, List[str]]:
-    """Detect banned organizations in text. Returns (has_banned, found_list)."""
     found = []
     for pattern in BANNED_PATTERNS:
         for match in pattern.finditer(text):
@@ -89,8 +88,7 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 
-def api_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Make API request with retry logic."""
+def api_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
     for attempt in range(RETRY_COUNT):
         try:
             response = requests.request(
@@ -122,7 +120,6 @@ def api_request(method: str, url: str, **kwargs) -> requests.Response:
 
 
 def get_repo_contents(path: str) -> List[Dict]:
-    """Get contents of a directory in the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     response = api_request("GET", url)
     if response and response.status_code == 200:
@@ -131,7 +128,6 @@ def get_repo_contents(path: str) -> List[Dict]:
 
 
 def get_file_content(path: str) -> Optional[str]:
-    """Get content of a file from the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     response = api_request("GET", url)
     if response and response.status_code == 200:
@@ -142,7 +138,6 @@ def get_file_content(path: str) -> Optional[str]:
 
 
 def get_file_sha(path: str) -> Optional[str]:
-    """Get SHA of a file from the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     response = api_request("GET", url)
     if response and response.status_code == 200:
@@ -151,7 +146,6 @@ def get_file_sha(path: str) -> Optional[str]:
 
 
 def create_file(path: str, content: str, message: str) -> bool:
-    """Create a new file in the knowledge repo."""
     url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{path}"
     payload = {
         "message": message,
@@ -163,7 +157,6 @@ def create_file(path: str, content: str, message: str) -> bool:
 
 
 def delete_file(path: str, message: str) -> bool:
-    """Delete a file from the knowledge repo."""
     sha = get_file_sha(path)
     if not sha:
         return False
@@ -179,7 +172,6 @@ def delete_file(path: str, message: str) -> bool:
 
 
 def move_file(source_path: str, dest_path: str) -> Tuple[bool, str]:
-    """Move a file by copying then deleting the original."""
     content = get_file_content(source_path)
     if not content:
         return False, "Could not read source file"
@@ -198,7 +190,6 @@ def move_file(source_path: str, dest_path: str) -> Tuple[bool, str]:
 # ===========================================================================
 
 def process_category(path: str) -> Dict:
-    """Process a single category directory."""
     results = {
         "scanned": 0,
         "found_banned": 0,
@@ -262,13 +253,11 @@ def process_category(path: str) -> Dict:
 
 
 def main():
-    """Main entry point."""
     print("=" * 70)
     print("Move Tainted Files to Issues v2.0")
     print("=" * 70)
     print(f"Banned orgs: {len(BANNED_ORGS)}")
     print(f"Repo: {KNOWLEDGE_REPO}")
-    print(f"CI Mode: {os.getenv('CI', 'false')}")
     print("=" * 70)
 
     if not GH_TOKEN or not KNOWLEDGE_REPO:
