@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter — v2.0
+Issue Rewriter — v2.1
 ======================
 Picks files from issues/ in the private repo.
 Rewrites content (removes banned orgs).
 Submits to training form as new knowledge.
 Deletes the original file after successful submission.
-Runs daily — 27 files per run.
+Runs daily — 5 files per run to avoid Groq rate limits.
 """
 
 import os
@@ -37,7 +37,7 @@ REQUEST_TIMEOUT = 90
 RETRY_COUNT = 3
 RETRY_DELAY = 2
 
-MAX_FILES = int(os.getenv("MAX_FILES", "27"))
+MAX_FILES = int(os.getenv("MAX_FILES", "5"))
 
 # ===========================================================================
 # Banned Organizations
@@ -102,7 +102,7 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 
-def api_request(method: str, url: str, **kwargs) -> requests.Response:
+def api_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
     for attempt in range(RETRY_COUNT):
         try:
             response = requests.request(
@@ -119,7 +119,7 @@ def api_request(method: str, url: str, **kwargs) -> requests.Response:
                 reset_time = response.headers.get('X-RateLimit-Reset', '')
                 if reset_time:
                     wait_time = max(int(reset_time) - int(time.time()) + 10, 30)
-                    print(f"    Rate limit. Waiting {wait_time}s...")
+                    print(f"    GitHub rate limit. Waiting {wait_time}s...")
                     time.sleep(wait_time)
                 continue
             if response.status_code >= 500:
@@ -177,7 +177,7 @@ def delete_file(path: str, message: str) -> Tuple[bool, str]:
 
 
 # ===========================================================================
-# AI Rewriting
+# AI Rewriting with Rate Limit Handling
 # ===========================================================================
 
 REWRITE_PROMPT = (
@@ -229,8 +229,14 @@ def rewrite_with_groq(content: str, attempt: int = 0) -> Optional[str]:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        print(f"    Groq error: {response.status_code}")
-        return None
+        elif response.status_code == 429:
+            wait_time = (attempt + 1) * 60
+            print(f"    Groq rate limit. Waiting {wait_time}s...")
+            time.sleep(wait_time)
+            return None
+        else:
+            print(f"    Groq error: {response.status_code}")
+            return None
     except Exception as e:
         print(f"    Groq exception: {e}")
         return None
@@ -266,8 +272,14 @@ def rewrite_with_mistral(content: str, attempt: int = 0) -> Optional[str]:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        print(f"    Mistral error: {response.status_code}")
-        return None
+        elif response.status_code == 429:
+            wait_time = (attempt + 1) * 60
+            print(f"    Mistral rate limit. Waiting {wait_time}s...")
+            time.sleep(wait_time)
+            return None
+        else:
+            print(f"    Mistral error: {response.status_code}")
+            return None
     except Exception as e:
         print(f"    Mistral exception: {e}")
         return None
@@ -364,18 +376,11 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str = "E
 # ===========================================================================
 
 def extract_info_from_filename(filename: str) -> Tuple[str, str]:
-    """Extract topic and category from filename."""
-    # Remove .md extension
     name = filename.replace(".md", "")
-
-    # Split by -
     parts = name.split("-")
 
-    # Skip date parts (first 3-4 parts are YYYYMMDD-HHMMSS-ID)
-    # Keep only meaningful words
     meaningful = []
     for p in parts:
-        # Skip if it looks like a date (8 digits) or time (6 digits) or ID (4 digits)
         if re.match(r'^\d{8}$', p):
             continue
         if re.match(r'^\d{6}$', p):
@@ -388,7 +393,6 @@ def extract_info_from_filename(filename: str) -> Tuple[str, str]:
     if not topic or len(topic) < 5:
         topic = "Knowledge from Community Sources"
 
-    # Determine category from filename
     category = "Other"
     category_map = {
         "agriculture": "Agriculture & Farming",
@@ -433,7 +437,6 @@ def extract_info_from_filename(filename: str) -> Tuple[str, str]:
 
 
 def process_file(file_path: str) -> Dict:
-    """Process a single file from issues/."""
     result = {
         "file": file_path,
         "status": "unknown",
@@ -443,34 +446,29 @@ def process_file(file_path: str) -> Dict:
 
     print(f"\n  Processing: {file_path}")
 
-    # Read content
     content = get_file_content(file_path)
     if not content:
         result["status"] = "error"
         result["error"] = "Could not read file"
         return result
 
-    # Extract info from filename
     filename = file_path.split("/")[-1]
     topic, category = extract_info_from_filename(filename)
 
     print(f"    Topic: {topic[:60]}...")
     print(f"    Category: {category}")
 
-    # Rewrite content
     rewritten, error = rewrite_content(content)
     if not rewritten:
         result["status"] = "error"
         result["error"] = error
         return result
 
-    # Check length
     if len(rewritten.split()) < 300:
         result["status"] = "error"
         result["error"] = f"Rewritten content too short: {len(rewritten.split())} words"
         return result
 
-    # Submit to training form
     success, msg = submit_to_form(topic, category, rewritten, "English")
 
     if not success:
@@ -481,7 +479,6 @@ def process_file(file_path: str) -> Dict:
     result["submission_id"] = msg
     print(f"    ✅ Submitted! ID: {msg}")
 
-    # Delete original file
     success, msg = delete_file(file_path, f"Rewritten and submitted: {msg}")
     if success:
         result["status"] = "completed"
@@ -495,9 +492,8 @@ def process_file(file_path: str) -> Dict:
 
 
 def main():
-    """Main entry point."""
     print("=" * 70)
-    print("Issue Rewriter v2.0")
+    print("Issue Rewriter v2.1")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"Max files: {MAX_FILES}")
@@ -505,7 +501,6 @@ def main():
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print("=" * 70)
 
-    # Validate configuration
     missing = []
     if not GH_TOKEN:
         missing.append("GH_TOKEN")
@@ -524,7 +519,6 @@ def main():
         print("ERROR: No AI API keys configured (GROQ_API_KEY or MISTRAL_API_KEY)")
         sys.exit(1)
 
-    # Get files from issues/
     issues = get_repo_contents("issues")
     if not issues:
         print("No files in issues/ folder.")
@@ -561,7 +555,6 @@ def main():
                 "error": result.get("error", "Unknown error")
             })
 
-        # Wait between files
         if i < len(md_files[:MAX_FILES]) - 1:
             print(f"  Waiting 30s...")
             time.sleep(30)
