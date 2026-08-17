@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Issue Rewriter — v3.1
+Issue Rewriter — v3.2
 ======================
 Picks files from issues/ in the private repo.
 Rewrites content using Cloudflare Workers AI (removes banned orgs).
 Uses AGGRESSIVE rewrite prompt to delete banned content.
+FIXED: Case-sensitive detection for short terms (WHO, UN, EU).
 Submits to training form as new knowledge.
 Deletes the original file after successful submission.
 Runs daily — 27 files per run.
@@ -42,22 +43,40 @@ RETRY_DELAY = 2
 MAX_FILES = int(os.getenv("MAX_FILES", "27"))
 
 # ===========================================================================
-# Banned Organizations
+# Banned Organizations — Case-sensitive for short terms
 # ===========================================================================
 
 BANNED_ORGS = [
-    "FAO", "Food and Agriculture Organization",
-    "WHO", "World Health Organization",
-    "UN", "United Nations",
-    "World Bank", "IMF", "International Monetary Fund",
-    "UNDP", "UNESCO", "UNICEF",
-    "USAID", "DFID", "GIZ",
-    "World Food Programme", "WFP",
-    "International Labour Organization", "ILO",
-    "World Trade Organization", "WTO",
-    "African Development Bank", "AfDB",
+    "FAO",
+    "Food and Agriculture Organization",
+    "World Health Organization",
+    "United Nations",
+    "World Bank",
+    "IMF",
+    "International Monetary Fund",
+    "UNDP",
+    "UNESCO",
+    "UNICEF",
+    "USAID",
+    "DFID",
+    "GIZ",
+    "World Food Programme",
+    "WFP",
+    "International Labour Organization",
+    "ILO",
+    "World Trade Organization",
+    "WTO",
+    "African Development Bank",
+    "AfDB",
     "European Union",
 ]
+
+# Short terms that must be EXACT matches and case-sensitive
+SHORT_TERMS = {
+    "WHO": "WHO",
+    "UN": "UN",
+    "EU": "EU",
+}
 
 BANNED_TERMS = [
     "development program", "aid program", "international assistance",
@@ -71,13 +90,20 @@ BANNED_TERMS_STRING = ", ".join(BANNED_TERMS)
 
 def build_banned_patterns() -> List[re.Pattern]:
     patterns = []
+
+    # Full organization names — case-insensitive
     for term in BANNED_ORGS:
-        if len(term) <= 3:
-            patterns.append(re.compile(rf'\b{re.escape(term)}\b', re.IGNORECASE))
-        else:
+        if len(term) > 3:
             patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+
+    # Short terms — case-sensitive with word boundaries
+    for term, pattern in SHORT_TERMS.items():
+        patterns.append(re.compile(rf'\b{re.escape(pattern)}\b'))
+
+    # Banned terms — case-insensitive
     for term in BANNED_TERMS:
         patterns.append(re.compile(rf'{re.escape(term)}', re.IGNORECASE))
+
     return patterns
 
 
@@ -185,7 +211,7 @@ def delete_file(path: str, message: str) -> Tuple[bool, str]:
 REWRITE_PROMPT = (
     f"You are an African knowledge expert. Rewrite the following content.\n\n"
     f"STRICT RULES:\n"
-    f"1. DELETE any sentence that mentions: {BANNED_ORGS_STRING}\n"
+    f"1. DELETE any sentence that mentions these organizations: {BANNED_ORGS_STRING}\n"
     f"2. DELETE any sentence that mentions: {BANNED_TERMS_STRING}\n"
     f"3. Do NOT replace them — DELETE them entirely\n"
     f"4. If a paragraph has 3 or more banned terms, delete the whole paragraph\n"
@@ -451,7 +477,7 @@ def process_file(file_path: str) -> Dict:
 
 def main():
     print("=" * 70)
-    print("Issue Rewriter v3.1 — Cloudflare AI (Aggressive)")
+    print("Issue Rewriter v3.2 — Cloudflare AI (Fixed Detection)")
     print("=" * 70)
     print(f"Repo: {KNOWLEDGE_REPO}")
     print(f"Max files: {MAX_FILES}")
