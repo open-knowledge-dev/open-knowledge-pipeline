@@ -1,8 +1,8 @@
 """
-AI-Powered Knowledge Scraper — v2.4.3
+AI-Powered Knowledge Scraper — v2.5.0
 ======================================
 Generates unique knowledge content using AI APIs with:
-- Batch topic caching (25 topics per API call — 42% token savings)
+- Batch topic caching (25 topics per API call)
 - Comparison topics (~25% of output for deeper content)
 - 10 rotating prompt styles with compare-contrast weighted higher
 - State file memory to avoid repeats
@@ -10,13 +10,11 @@ Generates unique knowledge content using AI APIs with:
 - Markdown stripping for clean output
 - Deduplication feedback loop
 - Minimum 670 words per submission
-- Region field left empty (no fake location data)
 - Language variation (English)
-- AI writes in the target language
-- Fixed state file key initialization to prevent KeyError crashes
 - Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
 
 APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
+Groq Model: llama-3.1-70b-versatile
 """
 
 import os
@@ -69,6 +67,11 @@ STATE_FILE_PATH = "admin/scraper-state.json"
 MIN_CONTENT_LENGTH = 500
 TOPIC_CACHE_SIZE = 25
 COMPARISON_TOPIC_RATIO = 0.25
+
+# ===========================================================================
+# Groq Model - Fixed
+# ===========================================================================
+GROQ_MODEL = "llama-3.1-70b-versatile"
 
 
 # ===========================================================================
@@ -556,7 +559,7 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     if GROQ_API_KEY:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama-3.3-70b",
+            "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -663,7 +666,7 @@ def generate_with_groq(topic: str, style: Dict, language: str) -> str:
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
     payload = {
-        "model": "llama-3.3-70b",
+        "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": style["system"]},
             {"role": "user", "content": user_prompt},
@@ -675,7 +678,6 @@ def generate_with_groq(topic: str, style: Dict, language: str) -> str:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             content = response.json()["choices"][0]["message"]["content"]
-            # Check for banned content
             if not _check_banned_content(content):
                 return ""
             print(f"    Generated {len(content)} chars")
@@ -709,7 +711,6 @@ def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
         response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             content = response.json()["choices"][0]["message"]["content"]
-            # Check for banned content
             if not _check_banned_content(content):
                 return ""
             print(f"    Generated {len(content)} chars")
@@ -797,13 +798,14 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.4.3 — {SCRAPER_NAME}")
+    print(f"AI Scraper v2.5.0 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
     print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch (~42% token savings)")
     print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
+    print(f"Groq Model: {GROQ_MODEL}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
@@ -855,7 +857,6 @@ def run_ai_scraper(max_submissions: int = 10):
             '', knowledge
         ).strip()
 
-        # Final safety check after stripping
         if not _check_banned_content(knowledge):
             failed += 1
             print("  Failed: Content contains banned organizations after stripping")
