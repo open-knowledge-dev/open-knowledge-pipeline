@@ -10,8 +10,6 @@ Zero copyright risk. Fully automated.
 
 Schedule: Runs daily. Processes one book per run.
 Resumes from where it left off if interrupted.
-- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
-- Updated to llama-3.3-70b-versatile
 """
 
 import os
@@ -275,7 +273,7 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.3-70b",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
