@@ -1,7 +1,7 @@
 """
-AI-Powered Knowledge Scraper — v2.5.0
+AI-Powered Knowledge Scraper — v3.0.0
 ======================================
-Generates unique knowledge content using AI APIs with:
+Generates unique knowledge content using Cloudflare Workers AI.
 - Batch topic caching (25 topics per API call)
 - Comparison topics (~25% of output for deeper content)
 - 10 rotating prompt styles with compare-contrast weighted higher
@@ -12,9 +12,9 @@ Generates unique knowledge content using AI APIs with:
 - Minimum 670 words per submission
 - Language variation (English)
 - Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
+- Cloudflare AI — 10,000 requests/day free
 
-APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
-Groq Model: llama-3.1-70b-versatile
+APIs: Cloudflare Workers AI (primary)
 """
 
 import os
@@ -34,19 +34,19 @@ from typing import Optional, List, Tuple, Dict
 # ===========================================================================
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
+CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 90
 
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 
 FOCUS_CATEGORIES_RAW = os.getenv("FOCUS_CATEGORIES", "")
 FOCUS_CATEGORIES = [c.strip() for c in FOCUS_CATEGORIES_RAW.split(",") if c.strip()]
@@ -67,11 +67,6 @@ STATE_FILE_PATH = "admin/scraper-state.json"
 MIN_CONTENT_LENGTH = 500
 TOPIC_CACHE_SIZE = 25
 COMPARISON_TOPIC_RATIO = 0.25
-
-# ===========================================================================
-# Groq Model - Fixed
-# ===========================================================================
-GROQ_MODEL = "llama-3.1-70b-versatile"
 
 
 # ===========================================================================
@@ -368,7 +363,6 @@ def _github_headers() -> Dict[str, str]:
 
 
 def _init_scraper_state(state: Dict) -> None:
-    """Ensure all required keys exist in scraper state to prevent KeyError."""
     if SCRAPER_NAME not in state:
         state[SCRAPER_NAME] = {}
     scraper = state[SCRAPER_NAME]
@@ -556,10 +550,12 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     )
 
     topics_text = ""
-    if GROQ_API_KEY:
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+        headers = {
+            "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
         payload = {
-            "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -568,29 +564,13 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
             "max_tokens": 500,
         }
         try:
-            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            response = requests.post(CLOUDFLARE_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
+                data = response.json()
+                if data.get("success"):
+                    topics_text = data.get("result", {}).get("response", "")
         except Exception as e:
-            print(f"  [Cache] Groq topic generation failed: {e}")
-
-    if not topics_text and MISTRAL_API_KEY:
-        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.95,
-            "max_tokens": 500,
-        }
-        try:
-            response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"  [Cache] Mistral topic generation failed: {e}")
+            print(f"  [Cache] Cloudflare topic generation failed: {e}")
 
     if not topics_text:
         print("  [Cache] Failed to generate topics. Using fallback.")
@@ -655,85 +635,56 @@ def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
 
 
 # ===========================================================================
-# AI Content Generation
+# AI Content Generation — Cloudflare
 # ===========================================================================
 
-def generate_with_groq(topic: str, style: Dict, language: str) -> str:
-    if not GROQ_API_KEY:
+def generate_with_cloudflare(topic: str, style: Dict, language: str) -> str:
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return ""
-    print(f"    [Groq] Style: {style['name']} | Language: {language}")
+
+    print(f"    [Cloudflare] Style: {style['name']} | Language: {language}")
     sys.stdout.flush()
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+
     user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
+    system_prompt = style["system"]
+
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
-        "model": GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": style["system"]},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": random.uniform(0.7, 0.95),
         "max_tokens": 2000,
     }
-    try:
-        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            if not _check_banned_content(content):
-                return ""
-            print(f"    Generated {len(content)} chars")
-            sys.stdout.flush()
-            return content
-        else:
-            print(f"    Groq error: {response.status_code}")
-            return ""
-    except Exception as e:
-        print(f"    Groq exception: {e}")
-        return ""
 
-
-def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
-    if not MISTRAL_API_KEY:
-        return ""
-    print(f"    [Mistral] Style: {style['name']} | Language: {language}")
-    sys.stdout.flush()
-    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
-    payload = {
-        "model": "mistral-small-latest",
-        "messages": [
-            {"role": "system", "content": style["system"]},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": random.uniform(0.7, 0.95),
-        "max_tokens": 2000,
-    }
     try:
-        response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.post(CLOUDFLARE_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            if not _check_banned_content(content):
-                return ""
-            print(f"    Generated {len(content)} chars")
-            sys.stdout.flush()
-            return content
-        else:
-            print(f"    Mistral error: {response.status_code}")
-            return ""
+            data = response.json()
+            if data.get("success"):
+                content = data.get("result", {}).get("response", "")
+                if not _check_banned_content(content):
+                    return ""
+                print(f"    Generated {len(content)} chars")
+                sys.stdout.flush()
+                return content
+        print(f"    Cloudflare error: {response.status_code}")
+        return ""
     except Exception as e:
-        print(f"    Mistral exception: {e}")
+        print(f"    Cloudflare exception: {e}")
         return ""
 
 
 def generate_content(topic: str, language: str) -> str:
     style = random.choice(PROMPT_STYLES)
-    if GROQ_API_KEY:
-        content = generate_with_groq(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
-    if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+    content = generate_with_cloudflare(topic, style, language)
+    if content and len(content) >= MIN_CONTENT_LENGTH:
+        return content
     return ""
 
 
@@ -798,24 +749,23 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.5.0 — {SCRAPER_NAME}")
+    print(f"AI Scraper v3.0.0 — Cloudflare AI — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
-    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch (~42% token savings)")
+    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch")
     print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
-    print(f"Groq Model: {GROQ_MODEL}")
-    print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
-    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
+    print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
+    print(f"Model: {CLOUDFLARE_MODEL}")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
     print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
     print("-" * 60)
     sys.stdout.flush()
 
-    if not GROQ_API_KEY and not MISTRAL_API_KEY:
-        print("ERROR: No API keys configured.")
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        print("ERROR: Cloudflare AI not configured.")
         return
 
     state = load_state()
