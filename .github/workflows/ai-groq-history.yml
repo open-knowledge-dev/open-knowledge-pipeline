@@ -1,9 +1,9 @@
 name: AI Scraper — Groq History & Heritage
 
 on:
-  schedule:
-    - cron: '45 */2 * * *'
-  workflow_dispatch:
+#  schedule:
+ #   - cron: '45 */2 * * *'
+ # workflow_dispatch:
 
 jobs:
   scrape:
