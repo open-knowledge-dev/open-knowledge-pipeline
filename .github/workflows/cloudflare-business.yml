@@ -1,8 +1,8 @@
 name: Cloudflare AI - Business
 
 on:
-  schedule:
-    - cron: '45 */3 * * *'
+ # schedule:
+  #  - cron: '45 */3 * * *'
   workflow_dispatch:
 
 jobs:
