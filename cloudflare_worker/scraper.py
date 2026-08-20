@@ -1,5 +1,5 @@
 """
-Cloudflare Workers AI Scraper — v3.1
+Cloudflare Workers AI Scraper — v3.2
 =====================================
 Uses Cloudflare Workers AI free tier to generate knowledge entries.
 Submits through the training form — same pipeline as all other scrapers.
@@ -28,7 +28,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from topics import TOPICS
-from prompts import PROMPTS
+from prompts import (
+    get_system_prompt,
+    get_user_prompt,
+    get_banned_orgs_list,
+    get_banned_instruction,
+    USER_PROMPT_TEMPLATES,
+)
 
 
 ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -53,6 +59,9 @@ REQUEST_TIMEOUT = 90
 MAX_REQUESTS_PER_MINUTE = 5
 request_timestamps = []
 
+# Prompt styles available
+PROMPT_STYLES = list(USER_PROMPT_TEMPLATES.keys())
+
 
 def enforce_rate_limit():
     """Ensure no more than MAX_REQUESTS_PER_MINUTE requests are made."""
@@ -71,11 +80,9 @@ def enforce_rate_limit():
     request_timestamps.append(time.time())
 
 
-def generate_entry(topic, prompt_template, model, retry_count=0):
+def generate_entry(topic, system_prompt, user_prompt, model, retry_count=0):
     """Call Cloudflare Workers AI API with exponential backoff on 429."""
     enforce_rate_limit()
-
-    prompt = prompt_template.format(topic=topic)
 
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
@@ -84,7 +91,8 @@ def generate_entry(topic, prompt_template, model, retry_count=0):
 
     payload = {
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE
@@ -95,20 +103,19 @@ def generate_entry(topic, prompt_template, model, retry_count=0):
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
 
-        # Handle 429 with exponential backoff
         if response.status_code == 429:
             if retry_count == 0:
                 wait_time = 30 + random.randint(1, 10)
                 print(f"  429 rate limited. Waiting {wait_time}s (retry 1/3)...")
                 sys.stdout.flush()
                 time.sleep(wait_time)
-                return generate_entry(topic, prompt_template, model, retry_count + 1)
+                return generate_entry(topic, system_prompt, user_prompt, model, retry_count + 1)
             elif retry_count == 1:
                 wait_time = 60 + random.randint(1, 15)
                 print(f"  429 rate limited again. Waiting {wait_time}s (retry 2/3)...")
                 sys.stdout.flush()
                 time.sleep(wait_time)
-                return generate_entry(topic, prompt_template, model, retry_count + 1)
+                return generate_entry(topic, system_prompt, user_prompt, model, retry_count + 1)
             else:
                 print(f"  429 third time — skipping this entry")
                 return None
@@ -226,16 +233,17 @@ def submit_to_form(topic, category, knowledge, language="English"):
 def run():
     """Main scraper loop."""
     print("=" * 60)
-    print("Cloudflare Workers AI Scraper v3.1")
+    print("Cloudflare Workers AI Scraper v3.2")
     print("=" * 60)
     print(f"Model: {MODEL}")
     print(f"Category: {CATEGORY}")
     print(f"Entries per run: {ENTRIES_PER_RUN}")
     print(f"Topic pool: {len(TOPICS)} topics")
-    print(f"Prompt styles: {len(PROMPTS)} templates")
+    print(f"Prompt styles: {len(PROMPT_STYLES)} templates")
     print(f"Submitting to: {TRAINING_FORM_URL}")
     print(f"Rate limit: {MAX_REQUESTS_PER_MINUTE} requests/minute")
     print(f"Backoff: 30s → 60s → skip on 429")
+    print(f"Banned orgs: {len(get_banned_orgs_list())} organizations blocked")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -254,13 +262,15 @@ def run():
     failed = 0
 
     for i, topic in enumerate(shuffled_topics[:ENTRIES_PER_RUN], 1):
-        prompt = random.choice(PROMPTS)
+        style = random.choice(PROMPT_STYLES)
+        system_prompt = get_system_prompt(CATEGORY)
+        user_prompt = get_user_prompt(topic, style)
 
         print(f"\n[{i}/{ENTRIES_PER_RUN}] {topic[:80]}...")
-        print(f"   Model: {MODEL}")
+        print(f"   Model: {MODEL} | Style: {style}")
         sys.stdout.flush()
 
-        content = generate_entry(topic, prompt, MODEL)
+        content = generate_entry(topic, system_prompt, user_prompt, MODEL)
 
         if content:
             content = clean_content(content)
