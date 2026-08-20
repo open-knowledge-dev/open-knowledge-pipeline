@@ -1,9 +1,9 @@
 name: AI Scraper — Mistral Governance
 
 on:
-  schedule:
-    - cron: '40 */3 * * *'
-  workflow_dispatch:
+#  schedule:
+   # - cron: '40 */3 * * *'
+#  workflow_dispatch:
 
 jobs:
   scrape:
