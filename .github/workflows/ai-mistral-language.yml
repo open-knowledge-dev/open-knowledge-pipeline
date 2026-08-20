@@ -1,9 +1,9 @@
 name: AI Scraper — Mistral Language & Proverbs
 
 on:
-  schedule:
-    - cron: '30 */3 * * *'
-  workflow_dispatch:
+#  schedule:
+ #   - cron: '30 */3 * * *'
+#  workflow_dispatch:
 
 jobs:
   scrape:
