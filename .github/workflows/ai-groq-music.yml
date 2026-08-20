@@ -1,9 +1,9 @@
 name: AI Scraper — Groq Music & Arts
 
 on:
-  schedule:
-    - cron: '25 */3 * * *'
-  workflow_dispatch:
+ # schedule:
+  #  - cron: '25 */3 * * *'
+  # workflow_dispatch:
 
 jobs:
   scrape:
