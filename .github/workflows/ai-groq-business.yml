@@ -1,7 +1,10 @@
 name: AI Scraper — Groq Business
 
 on:
-  .....
+ on:
+ # schedule:
+ #  - cron: '14 */2 * * *'
+ # workflow_dispatch:
 
 jobs:
   scrape:
