@@ -1,9 +1,9 @@
 name: Web Scraper — Science & Innovation
 
 on:
-  schedule:
-    - cron: '25 */4 * * *'
-  workflow_dispatch:
+ # schedule:
+  #  - cron: '25 */4 * * *'
+ # workflow_dispatch:
 
 jobs:
   scrape:
