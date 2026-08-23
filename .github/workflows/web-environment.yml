@@ -1,9 +1,9 @@
 name: Web Scraper — Environment & Nature
 
 on:
-  schedule:
-    - cron: '45 */4 * * *'
-  workflow_dispatch:
+ # schedule:
+  #  - cron: '45 */4 * * *'
+  #workflow_dispatch:
 
 jobs:
   scrape:
