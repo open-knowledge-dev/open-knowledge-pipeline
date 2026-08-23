@@ -1,9 +1,9 @@
 name: Issue Rewriter
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
+  #schedule:
+   # - cron: '0 6 * * *'
+  #workflow_dispatch:
 
 jobs:
   rewrite-issues:
