@@ -1,9 +1,9 @@
 name: Web Scraper — Global Voices
 
 on:
-  schedule:
-    - cron: '15 */3 * * *'
-  workflow_dispatch:
+ # schedule:
+   # - cron: '15 */3 * * *'
+#  workflow_dispatch:
 
 jobs:
   scrape:
