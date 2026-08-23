@@ -1,9 +1,9 @@
 name: Web Scraper — General
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
+ # schedule:
+  #  - cron: '0 */4 * * *'
+ # workflow_dispatch:
 
 jobs:
   scrape:
