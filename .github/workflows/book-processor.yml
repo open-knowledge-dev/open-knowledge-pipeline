@@ -1,9 +1,9 @@
 name: Book Processor — Gutenberg
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
-  workflow_dispatch:
+ # schedule:
+ #   - cron: '0 3 * * *'
+ # workflow_dispatch:
 
 jobs:
   process:
