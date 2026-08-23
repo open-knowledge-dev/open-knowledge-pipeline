@@ -1,9 +1,9 @@
 name: AI Scraper - Thin Categories
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
+ # schedule:
+#    - cron: '0 */4 * * *'
+ # workflow_dispatch:
 
 jobs:
   scrape:
