@@ -1,25 +1,26 @@
 """
-AI-Powered Knowledge Scraper — Environment & Nature — v2.4.3
+AI-Powered Knowledge Scraper — Environment & Nature — v3.1.0
 =============================================================
-Dedicated scraper for Environment & Nature knowledge.
+Dedicated scraper for Environment & Nature knowledge using Groq Qwen models.
 Focuses on climate, conservation, renewable energy, water management,
 waste management, biodiversity, and sustainability topics with
 West African and Ghanaian context.
 
 Features:
-- Batch topic caching (25 topics per API call — 42% token savings)
+- Batch topic caching (25 topics per API call)
 - Comparison topics (~25% of output for deeper content)
 - 10 rotating prompt styles with compare-contrast weighted higher
 - State file memory to avoid repeats
 - Markdown stripping for clean output
 - Deduplication feedback loop
 - Minimum 670 words per submission
-- Region field left empty (no fake location data)
 - Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
 - AI writes in the target language
-- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
+- Banned organization filtering
+- Metadata logging for source tracking
 
-APIs: Groq (primary, 10/run), Mistral (fallback, 5/run)
+APIs: Groq (Qwen 3.6 / 3.8 — Apache 2.0)
+Free tier: 14,400 requests/day (500K token soft cap)
 Schedule: Every 4 hours via GitHub Actions
 """
 
@@ -34,6 +35,14 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
 
+# Import metadata logger
+try:
+    from scraper_metadata import log_entry_metadata
+    METADATA_AVAILABLE = True
+except ImportError:
+    METADATA_AVAILABLE = False
+    print("[WARNING] scraper_metadata.py not found. Metadata logging disabled.")
+
 
 # ===========================================================================
 # Configuration
@@ -41,18 +50,19 @@ from typing import Optional, List, Tuple, Dict
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 90
 
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# Qwen models (Apache 2.0, training-safe)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen-3.6-27b")
 
 FOCUS_CATEGORIES = ["Environment & Nature"]
 
@@ -579,7 +589,7 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     if GROQ_API_KEY:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama-3.3-70b",
+            "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -593,24 +603,6 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
                 topics_text = response.json()["choices"][0]["message"]["content"]
         except Exception as e:
             print(f"  [Cache] Groq topic generation failed: {e}")
-
-    if not topics_text and MISTRAL_API_KEY:
-        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.95,
-            "max_tokens": 500,
-        }
-        try:
-            response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                topics_text = response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"  [Cache] Mistral topic generation failed: {e}")
 
     if not topics_text:
         print("  [Cache] Failed to generate topics. Using fallback.")
@@ -682,19 +674,28 @@ def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
 def generate_with_groq(topic: str, style: Dict, language: str) -> str:
     if not GROQ_API_KEY:
         return ""
-    print(f"    [Groq] Style: {style['name']} | Language: {language}")
+
+    print(f"    [Groq] Style: {style['name']} | Model: {GROQ_MODEL} | Language: {language}")
     sys.stdout.flush()
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+
     user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
+    system_prompt = style["system"]
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
-        "model": "llama-3.3-70b",
+        "model": GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": style["system"]},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": random.uniform(0.7, 0.95),
         "max_tokens": 2000,
     }
+
     try:
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
@@ -712,49 +713,11 @@ def generate_with_groq(topic: str, style: Dict, language: str) -> str:
         return ""
 
 
-def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
-    if not MISTRAL_API_KEY:
-        return ""
-    print(f"    [Mistral] Style: {style['name']} | Language: {language}")
-    sys.stdout.flush()
-    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
-    payload = {
-        "model": "mistral-small-latest",
-        "messages": [
-            {"role": "system", "content": style["system"]},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": random.uniform(0.7, 0.95),
-        "max_tokens": 2000,
-    }
-    try:
-        response = requests.post(MISTRAL_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            if not _check_banned_content(content):
-                return ""
-            print(f"    Generated {len(content)} chars")
-            sys.stdout.flush()
-            return content
-        else:
-            print(f"    Mistral error: {response.status_code}")
-            return ""
-    except Exception as e:
-        print(f"    Mistral exception: {e}")
-        return ""
-
-
 def generate_content(topic: str, language: str) -> str:
     style = random.choice(PROMPT_STYLES)
-    if GROQ_API_KEY:
-        content = generate_with_groq(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
-    if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+    content = generate_with_groq(topic, style, language)
+    if content and len(content) >= MIN_CONTENT_LENGTH:
+        return content
     return ""
 
 
@@ -811,23 +774,24 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v2.4.3 — {SCRAPER_NAME}")
+    print(f"AI Scraper v3.1.0 — Groq (Qwen) — Environment & Nature — {SCRAPER_NAME}")
     print(f"Category: Environment & Nature")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
+    print(f"Model: {GROQ_MODEL}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
-    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch (~42% token savings)")
+    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch")
     print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
-    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
     print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
+    print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
-    if not GROQ_API_KEY and not MISTRAL_API_KEY:
-        print("ERROR: No API keys configured.")
+    if not GROQ_API_KEY:
+        print("ERROR: GROQ_API_KEY not configured.")
         return
 
     state = load_state()
@@ -888,6 +852,21 @@ def run_ai_scraper(max_submissions: int = 10):
         if success:
             submission_count += 1
             state = record_topic(state, topic, submission_id, True)
+
+            # Log metadata for source tracking
+            if METADATA_AVAILABLE:
+                try:
+                    log_entry_metadata(
+                        submission_id=submission_id,
+                        source="groq",
+                        model=GROQ_MODEL,
+                        type="ai",
+                        category=category,
+                        email=""
+                    )
+                    print(f"  [Metadata] Logged: {submission_id}")
+                except Exception as e:
+                    print(f"  [Metadata] Failed to log: {e}")
         else:
             failed += 1
             state = record_topic(state, topic, "", False)
