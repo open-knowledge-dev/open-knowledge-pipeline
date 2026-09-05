@@ -1,8 +1,8 @@
 """
-Book Processor — v2.1
-======================
+Book Processor — v3.1.0
+=======================
 Automatically downloads public domain books from Project Gutenberg,
-extracts text, splits into chunks, rewrites via Groq AI in
+extracts text, splits into chunks, rewrites via Groq Qwen models in
 conversational African voice, and submits to the training form.
 
 All books are pre-1927 — indisputably public domain.
@@ -10,6 +10,9 @@ Zero copyright risk. Fully automated.
 
 Schedule: Runs daily. Processes one book per run.
 Resumes from where it left off if interrupted.
+- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
+- Updated to Qwen models (Apache 2.0)
+- Metadata logging for source tracking
 """
 
 import os
@@ -22,6 +25,14 @@ import re
 import requests
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+
+# Import metadata logger
+try:
+    from scraper_metadata import log_entry_metadata
+    METADATA_AVAILABLE = True
+except ImportError:
+    METADATA_AVAILABLE = False
+    print("[WARNING] scraper_metadata.py not found. Metadata logging disabled.")
 
 
 # ===========================================================================
@@ -41,6 +52,9 @@ GITHUB_API = "https://api.github.com"
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# Qwen models (Apache 2.0, training-safe)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen-3.6-27b")
 
 STATE_FILE_PATH = "admin/book-processor-state.json"
 MAX_CHUNKS_PER_RUN = 40
@@ -163,7 +177,7 @@ def download_book(book_id: str) -> Optional[str]:
         try:
             print(f"  Downloading: {url}")
             sys.stdout.flush()
-            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/2.1"})
+            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/3.1"})
             if response.status_code == 200:
                 text = response.text
                 text = clean_gutenberg_text(text)
@@ -249,7 +263,7 @@ def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
 # ===========================================================================
 
 def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
-    """Rewrite a book chunk in conversational African voice using Groq."""
+    """Rewrite a book chunk in conversational African voice using Groq Qwen."""
     if not GROQ_API_KEY:
         return ""
 
@@ -273,7 +287,7 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.3-70b",
+        "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -460,12 +474,14 @@ def save_state(state: Dict) -> bool:
 def run_book_processor():
     """Download and process one public domain book per run."""
     print("=" * 60)
-    print("Book Processor v2.1 — Project Gutenberg")
+    print("Book Processor v3.1.0 — Project Gutenberg")
     print("=" * 60)
     print(f"Max chunks per run: {MAX_CHUNKS_PER_RUN}")
+    print(f"Groq Model: {GROQ_MODEL}")
     print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
     print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
+    print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     sys.stdout.flush()
 
     if not GROQ_API_KEY and not MISTRAL_API_KEY:
@@ -565,9 +581,25 @@ def run_book_processor():
         sys.stdout.flush()
 
         success, sid = submit_to_form(topic, current_book["category"], knowledge)
+
         if success:
             submission_count += 1
             print(f"  ✅ {sid}")
+
+            # Log metadata for source tracking
+            if METADATA_AVAILABLE:
+                try:
+                    log_entry_metadata(
+                        submission_id=sid,
+                        source="groq" if GROQ_API_KEY else "mistral",
+                        model=GROQ_MODEL if GROQ_API_KEY else "mistral-small-latest",
+                        type="public_domain",
+                        category=current_book["category"],
+                        email=""
+                    )
+                    print(f"  [Metadata] Logged: {sid}")
+                except Exception as e:
+                    print(f"  [Metadata] Failed to log: {e}")
         else:
             failed_count += 1
             print(f"  ❌ Failed")
