@@ -1,5 +1,5 @@
 """
-Scraper Metadata Logger — v1.0
+Scraper Metadata Logger — v2.0
 ================================
 Helper module for scrapers to log source/model metadata to 
 entry-metadata.jsonl in the private knowledge repo.
@@ -7,13 +7,23 @@ entry-metadata.jsonl in the private knowledge repo.
 This is called AFTER a successful submission to the training form,
 so we have a valid submission_id to log.
 
+ALLOWED SOURCES:
+- cloudflare: @cf/qwen/qwen3-30b-a3b-fp8, @cf/mistral/mistral-7b-instruct-v0.2-lora
+- mistral: mistral-small-latest
+- human: human contributions (email required)
+- web: web scrapers
+- public_domain: public domain books
+
+BANNED:
+- All Llama models (Meta) — never use, never log
+
 Usage:
     from scraper_metadata import log_entry_metadata
     
     success = log_entry_metadata(
         submission_id="XXXX-YYYY",
         source="cloudflare",
-        model="@cf/mistral/mistral-7b-instruct-v0.2-lora",
+        model="@cf/qwen/qwen3-30b-a3b-fp8",
         type="ai",
         category="Agriculture & Farming",
         email=""
@@ -44,6 +54,22 @@ METADATA_FILE_PATH = "admin/entry-metadata.jsonl"
 RETRY_COUNT = 3
 RETRY_DELAY = 2
 REQUEST_TIMEOUT = 15
+
+# Allowed sources
+ALLOWED_SOURCES = ["cloudflare", "mistral", "human", "web", "public_domain"]
+
+# Allowed types
+ALLOWED_TYPES = ["ai", "human", "web", "public_domain"]
+
+# Clean models (Apache 2.0 or permissive)
+CLEAN_MODELS = [
+    "@cf/qwen/qwen3-30b-a3b-fp8",
+    "@cf/mistral/mistral-7b-instruct-v0.2-lora",
+    "@cf/qwen/qwq-32b",
+    "@cf/qwen/qwen3.8-27b",
+    "mistral-small-latest",
+    "mistral-medium-latest",
+]
 
 
 # ===========================================================================
@@ -184,8 +210,8 @@ def log_entry_metadata(
     
     Args:
         submission_id: Required, the submission ID
-        source: groq, mistral, cloudflare, human, web, public_domain
-        model: Specific model name if AI-generated, empty string for human/web
+        source: cloudflare, mistral, human, web, public_domain
+        model: Specific clean model name if AI-generated, empty string for human/web
         type: ai, human, web, public_domain
         category: Category name from the submission
         email: Contributor email if human, empty for scrapers
@@ -198,7 +224,7 @@ def log_entry_metadata(
         log_entry_metadata(
             submission_id="XXXX-YYYY",
             source="cloudflare",
-            model="@cf/mistral/mistral-7b-instruct-v0.2-lora",
+            model="@cf/qwen/qwen3-30b-a3b-fp8",
             type="ai",
             category="Agriculture & Farming"
         )
@@ -216,16 +242,23 @@ def log_entry_metadata(
         print("[Metadata] ERROR: type is required")
         return False
     
-    # Validate type
-    valid_types = ["ai", "human", "web", "public_domain"]
-    if type not in valid_types:
-        print(f"[Metadata] ERROR: type must be one of {valid_types}")
+    # Validate source
+    if source not in ALLOWED_SOURCES:
+        print(f"[Metadata] ERROR: source must be one of {ALLOWED_SOURCES}")
         return False
     
-    # Validate source
-    valid_sources = ["groq", "mistral", "cloudflare", "human", "web", "public_domain"]
-    if source not in valid_sources:
-        print(f"[Metadata] WARNING: source '{source}' not in standard list")
+    # Validate type
+    if type not in ALLOWED_TYPES:
+        print(f"[Metadata] ERROR: type must be one of {ALLOWED_TYPES}")
+        return False
+    
+    # If AI type, model must be provided and must be a clean model
+    if type == "ai":
+        if not model:
+            print("[Metadata] ERROR: model is required for AI-generated content")
+            return False
+        if model not in CLEAN_MODELS:
+            print(f"[Metadata] WARNING: model '{model}' not in clean models list")
     
     # Build metadata entry
     entry = {
@@ -265,7 +298,12 @@ def log_entry_metadata(
 # Convenience Functions for Different Sources
 # ===========================================================================
 
-def log_ai_entry(submission_id: str, source: str, model: str, category: str) -> bool:
+def log_ai_entry(
+    submission_id: str, 
+    source: str, 
+    model: str, 
+    category: str
+) -> bool:
     """Log an AI-generated entry."""
     return log_entry_metadata(
         submission_id=submission_id,
@@ -276,7 +314,11 @@ def log_ai_entry(submission_id: str, source: str, model: str, category: str) -> 
     )
 
 
-def log_human_entry(submission_id: str, email: str, category: str) -> bool:
+def log_human_entry(
+    submission_id: str, 
+    email: str, 
+    category: str
+) -> bool:
     """Log a human-contributed entry."""
     return log_entry_metadata(
         submission_id=submission_id,
@@ -288,7 +330,11 @@ def log_human_entry(submission_id: str, email: str, category: str) -> bool:
     )
 
 
-def log_web_entry(submission_id: str, source: str, category: str) -> bool:
+def log_web_entry(
+    submission_id: str, 
+    source: str, 
+    category: str
+) -> bool:
     """Log a web-scraped entry."""
     return log_entry_metadata(
         submission_id=submission_id,
@@ -299,7 +345,11 @@ def log_web_entry(submission_id: str, source: str, category: str) -> bool:
     )
 
 
-def log_public_domain_entry(submission_id: str, source: str, category: str) -> bool:
+def log_public_domain_entry(
+    submission_id: str, 
+    source: str, 
+    category: str
+) -> bool:
     """Log a public domain book entry."""
     return log_entry_metadata(
         submission_id=submission_id,
@@ -349,6 +399,25 @@ def get_metadata_count() -> int:
     
     lines = [l for l in content.strip().split("\n") if l.strip()]
     return len(lines)
+
+
+def get_metadata_by_submission_id(submission_id: str) -> Optional[Dict[str, Any]]:
+    """Get metadata for a specific submission ID."""
+    content, sha = _get_file_content(METADATA_FILE_PATH)
+    if content is None:
+        return None
+    
+    for line in content.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+            if data.get("submission_id") == submission_id:
+                return data
+        except json.JSONDecodeError:
+            continue
+    
+    return None
 
 
 if __name__ == "__main__":
