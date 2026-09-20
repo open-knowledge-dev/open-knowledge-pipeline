@@ -1,8 +1,8 @@
 """
-Book Processor — v3.1.0
+Book Processor — v4.0.0
 =======================
 Automatically downloads public domain books from Project Gutenberg,
-extracts text, splits into chunks, rewrites via Groq Qwen models in
+extracts text, splits into chunks, rewrites via Cloudflare Qwen models in
 conversational African voice, and submits to the training form.
 
 All books are pre-1927 — indisputably public domain.
@@ -11,8 +11,10 @@ Zero copyright risk. Fully automated.
 Schedule: Runs daily. Processes one book per run.
 Resumes from where it left off if interrupted.
 - Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
-- Updated to Qwen models (Apache 2.0)
+- Cloudflare Qwen models (Apache 2.0)
+- Mistral fallback (100 req/day)
 - Metadata logging for source tracking
+- Clean models only — NO Llama/Meta
 """
 
 import os
@@ -40,8 +42,15 @@ except ImportError:
 # ===========================================================================
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# Cloudflare AI credentials
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
+CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/qwen/qwen3-30b-a3b-fp8")
+
+# Mistral API (fallback)
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "60"))
 REQUEST_TIMEOUT = 90
@@ -50,11 +59,8 @@ GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
-
-# Qwen models (Apache 2.0, training-safe)
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen-3.6-27b")
 
 STATE_FILE_PATH = "admin/book-processor-state.json"
 MAX_CHUNKS_PER_RUN = 40
@@ -177,7 +183,7 @@ def download_book(book_id: str) -> Optional[str]:
         try:
             print(f"  Downloading: {url}")
             sys.stdout.flush()
-            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/3.1"})
+            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/4.0"})
             if response.status_code == 200:
                 text = response.text
                 text = clean_gutenberg_text(text)
@@ -259,12 +265,12 @@ def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
 
 
 # ===========================================================================
-# AI Rewriting
+# AI Rewriting — Cloudflare (Primary)
 # ===========================================================================
 
-def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
-    """Rewrite a book chunk in conversational African voice using Groq Qwen."""
-    if not GROQ_API_KEY:
+def rewrite_with_cloudflare(chunk: str, book_title: str, book_author: str) -> str:
+    """Rewrite a book chunk in conversational African voice using Cloudflare Qwen."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return ""
 
     system_prompt = (
@@ -285,9 +291,12 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
         f"Write at least 400 words. Use plain text only."
     )
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
-        "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -297,17 +306,23 @@ def rewrite_with_groq(chunk: str, book_title: str, book_author: str) -> str:
     }
 
     try:
-        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.post(CLOUDFLARE_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            if not _check_banned_content(content):
-                return ""
-            return content
+            data = response.json()
+            if data.get("success"):
+                content = data.get("result", {}).get("response", "")
+                if not _check_banned_content(content):
+                    return ""
+                return content
         return ""
     except Exception as e:
-        print(f"    Groq error: {e}")
+        print(f"    Cloudflare error: {e}")
         return ""
 
+
+# ===========================================================================
+# AI Rewriting — Mistral (Fallback)
+# ===========================================================================
 
 def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
     """Rewrite using Mistral (fallback)."""
@@ -351,11 +366,14 @@ def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
 
 def rewrite_chunk(chunk: str, book_title: str, book_author: str) -> str:
     """Rewrite a chunk using available AI APIs."""
-    if GROQ_API_KEY:
-        content = rewrite_with_groq(chunk, book_title, book_author)
+
+    # Primary: Cloudflare
+    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+        content = rewrite_with_cloudflare(chunk, book_title, book_author)
         if content and len(content) >= MIN_CHUNK_LENGTH:
             return content
 
+    # Fallback: Mistral
     if MISTRAL_API_KEY:
         content = rewrite_with_mistral(chunk, book_title, book_author)
         if content and len(content) >= MIN_CHUNK_LENGTH:
@@ -474,19 +492,21 @@ def save_state(state: Dict) -> bool:
 def run_book_processor():
     """Download and process one public domain book per run."""
     print("=" * 60)
-    print("Book Processor v3.1.0 — Project Gutenberg")
+    print("Book Processor v4.0.0 — Project Gutenberg")
     print("=" * 60)
     print(f"Max chunks per run: {MAX_CHUNKS_PER_RUN}")
-    print(f"Groq Model: {GROQ_MODEL}")
-    print(f"Groq: {'ACTIVE' if GROQ_API_KEY else 'NOT SET'}")
-    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'}")
+    print(f"Cloudflare Model: {CLOUDFLARE_MODEL}")
+    print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
+    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'} (fallback)")
     print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
     print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     sys.stdout.flush()
 
-    if not GROQ_API_KEY and not MISTRAL_API_KEY:
-        print("ERROR: No AI API keys configured.")
-        return
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        if not MISTRAL_API_KEY:
+            print("ERROR: No AI providers configured (Cloudflare and Mistral both missing).")
+            return
+        print("WARNING: Cloudflare not configured. Using Mistral only (limited quota).")
 
     state = load_state()
 
@@ -589,10 +609,18 @@ def run_book_processor():
             # Log metadata for source tracking
             if METADATA_AVAILABLE:
                 try:
+                    # Determine which provider was used
+                    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+                        source = "cloudflare"
+                        model = CLOUDFLARE_MODEL
+                    else:
+                        source = "mistral"
+                        model = "mistral-small-latest"
+
                     log_entry_metadata(
                         submission_id=sid,
-                        source="groq" if GROQ_API_KEY else "mistral",
-                        model=GROQ_MODEL if GROQ_API_KEY else "mistral-small-latest",
+                        source=source,
+                        model=model,
                         type="public_domain",
                         category=current_book["category"],
                         email=""
