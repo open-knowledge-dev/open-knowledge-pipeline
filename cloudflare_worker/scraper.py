@@ -1,5 +1,5 @@
 """
-Cloudflare Workers AI Scraper — v3.2
+Cloudflare Workers AI Scraper — v4.0.0
 =====================================
 Uses Cloudflare Workers AI free tier to generate knowledge entries.
 Submits through the training form — same pipeline as all other scrapers.
@@ -11,8 +11,13 @@ Rate limiting built in:
 - Per-minute cap: 5 requests/minute
 - Never exceeds Cloudflare rate limits
 
-Models: Llama 8B, Mistral 7B, Llama 70B, Qwen3 30B
+Models: Clean models only — NO Llama/Meta
+- @cf/qwen/qwen3-30b-a3b-fp8 (Apache 2.0)
+- @cf/mistral/mistral-7b-instruct-v0.2-lora (Apache 2.0)
+- @cf/qwen/qwq-32b (Apache 2.0)
+
 Free tier: 10,000 requests/day
+Metadata logging for source tracking.
 """
 
 import os
@@ -23,6 +28,20 @@ import random
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Import metadata logger
+try:
+    from scraper_metadata import log_entry_metadata
+    METADATA_AVAILABLE = True
+except ImportError:
+    # Try relative to parent (cloudflare_worker runs from different dir)
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from scraper_metadata import log_entry_metadata
+        METADATA_AVAILABLE = True
+    except ImportError:
+        METADATA_AVAILABLE = False
+        print("[WARNING] scraper_metadata.py not found. Metadata logging disabled.")
 
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -39,7 +58,9 @@ from prompts import (
 
 ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
 API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
-MODEL = os.environ.get("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
+
+# Default to clean Qwen model (Apache 2.0, training-safe)
+MODEL = os.environ.get("CLOUDFLARE_MODEL", "@cf/qwen/qwen3-30b-a3b-fp8")
 CATEGORY = os.environ.get("SCRAPER_CATEGORY", "Culture & Traditions")
 
 TRAINING_FORM_URL = os.environ.get("TRAINING_FORM_URL", "")
@@ -233,7 +254,7 @@ def submit_to_form(topic, category, knowledge, language="English"):
 def run():
     """Main scraper loop."""
     print("=" * 60)
-    print("Cloudflare Workers AI Scraper v3.2")
+    print("Cloudflare Workers AI Scraper v4.0.0")
     print("=" * 60)
     print(f"Model: {MODEL}")
     print(f"Category: {CATEGORY}")
@@ -244,6 +265,7 @@ def run():
     print(f"Rate limit: {MAX_REQUESTS_PER_MINUTE} requests/minute")
     print(f"Backoff: 30s → 60s → skip on 429")
     print(f"Banned orgs: {len(get_banned_orgs_list())} organizations blocked")
+    print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -283,6 +305,21 @@ def run():
                 if success:
                     successful += 1
                     print(f"   {submission_id} ({word_count} words)")
+
+                    # Log metadata for source tracking
+                    if METADATA_AVAILABLE:
+                        try:
+                            log_entry_metadata(
+                                submission_id=submission_id,
+                                source="cloudflare",
+                                model=MODEL,
+                                type="ai",
+                                category=CATEGORY,
+                                email=""
+                            )
+                            print(f"   [Metadata] Logged: {submission_id}")
+                        except Exception as e:
+                            print(f"   [Metadata] Failed to log: {e}")
                 else:
                     failed += 1
                     print(f"   Submission failed")
