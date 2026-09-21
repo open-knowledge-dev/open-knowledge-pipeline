@@ -27,7 +27,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
-          AUDIT_BATCH_SIZE: "500"
+          AUDIT_BATCH_SIZE: "2000"
         run: python metadata_audit.py
 
       - name: Summary
