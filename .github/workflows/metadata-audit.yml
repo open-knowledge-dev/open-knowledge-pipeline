@@ -9,7 +9,7 @@ on:
 jobs:
   audit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -29,16 +29,7 @@ jobs:
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
         run: python metadata_audit.py
 
-      - name: Upload audit report
-        uses: actions/upload-artifact@v4
-        with:
-          name: metadata-audit-report
-          path: |
-            metadata_report.json
-            metadata_report.md
-          retention-days: 90
-
       - name: Summary
         run: |
           echo "✅ Metadata audit complete."
-          echo "Check the artifacts for the full report."
+          echo "Report saved to admin/metadata_report.md in the knowledge repo."
