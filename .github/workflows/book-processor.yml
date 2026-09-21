@@ -1,32 +1,38 @@
-name: Book Processor — Gutenberg
+name: Cloudflare AI - Business
 
 on:
- # schedule:
- #   - cron: '0 3 * * *'
- # workflow_dispatch:
+  schedule:
+    - cron: '45 */3 * * *'
+  workflow_dispatch:
 
 jobs:
-  process:
+  scrape:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run book processor
+      - name: Run Cloudflare Business Scraper
         env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_MODEL: "@cf/qwen/qwen3-30b-a3b-fp8"
+          SCRAPER_CATEGORY: "Business & Finance"
+          ENTRIES_PER_RUN: "10"
+          MIN_WORDS: "500"
+          MAX_TOKENS: "2000"
           TRAINING_FORM_URL: ${{ secrets.TRAINING_FORM_URL }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
-        run: python book_processor.py
+        run: python cloudflare_worker/scraper.py
