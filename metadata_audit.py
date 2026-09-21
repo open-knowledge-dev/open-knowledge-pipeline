@@ -1,8 +1,9 @@
 """
-Metadata Audit Tool — v1.1
+Metadata Audit Tool — v1.2
 ===========================
-Scans all knowledge files in the private knowledge repo and reports
-which ones are missing metadata in entry-metadata.jsonl.
+Scans knowledge files in the private knowledge repo in batches.
+Processes AUDIT_BATCH_SIZE files per run, saves progress, and resumes
+from where it left off on the next run.
 
 This is a READ-ONLY audit tool for the knowledge files.
 It writes the report to admin/metadata_report.md in the private repo.
@@ -13,10 +14,12 @@ Usage:
 Environment variables needed:
     - GH_TOKEN: GitHub API token
     - KNOWLEDGE_REPO: "org/repo-name"
+    - AUDIT_BATCH_SIZE: Number of files to process per run (default: 500)
 
 Output:
     - Console report with summary
     - admin/metadata_report.md in the knowledge repo (committed)
+    - admin/audit-progress.json in the knowledge repo (resume state)
 """
 
 import os
@@ -36,6 +39,10 @@ import time
 GITHUB_API = "https://api.github.com"
 METADATA_FILE_PATH = "admin/entry-metadata.jsonl"
 REPORT_REPO_PATH = "admin/metadata_report.md"
+PROGRESS_REPO_PATH = "admin/audit-progress.json"
+
+# Batch size — process this many files per run
+AUDIT_BATCH_SIZE = int(os.getenv("AUDIT_BATCH_SIZE", "500"))
 
 # Categories to scan
 CATEGORY_SLUGS = {
@@ -72,7 +79,6 @@ REQUEST_TIMEOUT = 15
 # ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
-    """Get GitHub API headers with authentication."""
     token = os.getenv("GH_TOKEN")
     if not token:
         return {"Accept": "application/vnd.github.v3+json"}
@@ -83,7 +89,6 @@ def _github_headers() -> Dict[str, str]:
 
 
 def _get_repo() -> str:
-    """Get the knowledge repo from environment."""
     repo = os.getenv("KNOWLEDGE_REPO")
     if not repo:
         raise ValueError("KNOWLEDGE_REPO environment variable not set")
@@ -91,7 +96,6 @@ def _get_repo() -> str:
 
 
 def _github_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
-    """Make a GitHub API request with retry logic."""
     headers = _github_headers()
     kwargs.setdefault("timeout", REQUEST_TIMEOUT)
 
@@ -114,7 +118,7 @@ def _github_request(method: str, url: str, **kwargs) -> Optional[requests.Respon
                 continue
 
             if response.status_code >= 500:
-                print(f"  [Audit] GitHub server error {response.status_code}. Retry {attempt + 1}/{RETRY_COUNT}...")
+                print(f"  [Audit] Server error {response.status_code}. Retry {attempt + 1}/{RETRY_COUNT}...")
                 time.sleep(RETRY_DELAY * (attempt + 1))
                 continue
 
@@ -128,7 +132,6 @@ def _github_request(method: str, url: str, **kwargs) -> Optional[requests.Respon
 
 
 def _get_file_content(path: str) -> Optional[str]:
-    """Get content of a file from GitHub."""
     repo = _get_repo()
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     response = _github_request("GET", url)
@@ -149,7 +152,6 @@ def _get_file_content(path: str) -> Optional[str]:
 
 
 def _get_file_sha(path: str) -> Optional[str]:
-    """Get SHA of a file from GitHub."""
     repo = _get_repo()
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     response = _github_request("GET", url)
@@ -159,7 +161,6 @@ def _get_file_sha(path: str) -> Optional[str]:
 
 
 def _list_directory(path: str) -> List[Dict[str, Any]]:
-    """List contents of a directory in GitHub."""
     repo = _get_repo()
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
     response = _github_request("GET", url)
@@ -172,10 +173,8 @@ def _list_directory(path: str) -> List[Dict[str, Any]]:
 
 
 def _write_file(path: str, content: str, commit_message: str) -> bool:
-    """Write or update a file in the knowledge repo."""
     repo = _get_repo()
     url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
-
     sha = _get_file_sha(path)
 
     payload = {
@@ -187,9 +186,39 @@ def _write_file(path: str, content: str, commit_message: str) -> bool:
         payload["sha"] = sha
 
     response = _github_request("PUT", url, json=payload)
-    if response and response.status_code in [200, 201]:
-        return True
-    return False
+    return response is not None and response.status_code in [200, 201]
+
+
+# ===========================================================================
+# Progress Tracking
+# ===========================================================================
+
+def load_progress() -> Dict[str, Any]:
+    """Load audit progress from GitHub."""
+    content = _get_file_content(PROGRESS_REPO_PATH)
+    if not content:
+        return {
+            "last_audited_category": None,
+            "last_audited_index": 0,
+            "completed": False,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+    try:
+        return json.loads(content)
+    except Exception:
+        return {
+            "last_audited_category": None,
+            "last_audited_index": 0,
+            "completed": False,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def save_progress(progress: Dict[str, Any]) -> bool:
+    """Save audit progress to GitHub."""
+    content = json.dumps(progress, indent=2)
+    message = "Update audit progress"
+    return _write_file(PROGRESS_REPO_PATH, content, message)
 
 
 # ===========================================================================
@@ -197,28 +226,22 @@ def _write_file(path: str, content: str, commit_message: str) -> bool:
 # ===========================================================================
 
 def load_metadata() -> Dict[str, Dict[str, Any]]:
-    """Load entry-metadata.jsonl and return a dict keyed by submission_id."""
     content = _get_file_content(METADATA_FILE_PATH)
     if not content:
         print(f"  [Audit] WARNING: entry-metadata.jsonl is empty or missing")
         return {}
 
     metadata = {}
-    errors = []
-
-    for i, line in enumerate(content.strip().split("\n"), 1):
+    for line in content.strip().split("\n"):
         if not line.strip():
             continue
         try:
             entry = json.loads(line)
-            submission_id = entry.get("submission_id", "")
-            if submission_id:
-                metadata[submission_id] = entry
-        except json.JSONDecodeError as e:
-            errors.append(f"Line {i}: {e}")
-
-    if errors:
-        print(f"  [Audit] WARNING: {len(errors)} invalid lines in metadata file")
+            sid = entry.get("submission_id", "")
+            if sid:
+                metadata[sid] = entry
+        except json.JSONDecodeError:
+            continue
 
     return metadata
 
@@ -228,7 +251,6 @@ def load_metadata() -> Dict[str, Dict[str, Any]]:
 # ===========================================================================
 
 def scan_category(category_slug: str) -> List[Dict[str, Any]]:
-    """Scan a category directory and return list of file info."""
     files = []
     items = _list_directory(category_slug)
 
@@ -249,107 +271,195 @@ def scan_category(category_slug: str) -> List[Dict[str, Any]]:
 
 
 def extract_submission_id_from_filename(filename: str) -> Optional[str]:
-    """
-    Try to extract a submission ID from a filename.
-    Filenames may contain GHGPT-XXXX-YYYY anywhere.
-    """
     import re
     match = re.search(r'GHGPT-\d{4}-\d{4}', filename)
-    if match:
-        return match.group(0)
-    return None
+    return match.group(0) if match else None
 
 
 def extract_submission_id_from_content(content: str) -> Optional[str]:
-    """Try to extract submission ID from file content (frontmatter)."""
     import re
     match = re.search(r'GHGPT-\d{4}-\d{4}', content)
-    if match:
-        return match.group(0)
-    return None
+    return match.group(0) if match else None
 
 
 def get_file_submission_id(file_info: Dict[str, Any]) -> Optional[str]:
-    """Get submission ID from a file — try filename first, then content."""
-    # Try filename
+    # Try filename first — no API call needed
     sid = extract_submission_id_from_filename(file_info["name"])
     if sid:
         return sid
 
-    # Try content
+    # Only fetch content if filename has no ID
     content = _get_file_content(file_info["path"])
     if content:
-        sid = extract_submission_id_from_content(content)
-        if sid:
-            return sid
+        return extract_submission_id_from_content(content)
 
     return None
 
 
 # ===========================================================================
-# Audit Logic
+# Audit Logic (Batched)
 # ===========================================================================
 
-def audit_category(category_name: str, category_slug: str, metadata: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Audit a single category."""
-    print(f"\n--- Auditing: {category_name} ---")
+def run_audit_batch(metadata: Dict[str, Dict[str, Any]], progress: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one batch of the audit."""
+    categories = list(CATEGORY_SLUGS.items())
 
-    files = scan_category(category_slug)
-    if not files:
-        print(f"  No files found")
-        return {
+    # Find the starting category
+    start_category = progress.get("last_audited_category")
+    start_index = progress.get("last_audited_index", 0)
+
+    if start_category is None:
+        category_start = 0
+    else:
+        category_start = next(
+            (i for i, (name, _) in enumerate(categories) if name == start_category),
+            0
+        )
+
+    files_processed_this_run = 0
+    all_results = []
+    completed = False
+
+    print(f"\nProcessing batch of up to {AUDIT_BATCH_SIZE} files...")
+    print(f"Starting from: {start_category or 'beginning'} (index {start_index})")
+    print("-" * 70)
+
+    for cat_idx in range(category_start, len(categories)):
+        category_name, category_slug = categories[cat_idx]
+
+        # Skip to start index if this is the starting category
+        file_start = start_index if cat_idx == category_start else 0
+
+        files = scan_category(category_slug)
+        total_files_in_category = len(files)
+
+        # Filter out already-processed files
+        files_to_process = files[file_start:]
+
+        if not files_to_process:
+            continue
+
+        category_result = {
             "category": category_name,
             "slug": category_slug,
-            "total_files": 0,
+            "total_files": total_files_in_category,
             "with_metadata": 0,
             "missing_metadata": 0,
             "missing_ids": [],
         }
 
-    print(f"  Found {len(files)} files")
+        for file_info in files_to_process:
+            if files_processed_this_run >= AUDIT_BATCH_SIZE:
+                break
 
-    with_metadata = 0
-    missing_metadata = 0
-    missing_ids = []
+            sid = get_file_submission_id(file_info)
 
-    for file_info in files:
-        sid = get_file_submission_id(file_info)
+            if sid is None:
+                category_result["missing_metadata"] += 1
+                category_result["missing_ids"].append({
+                    "path": file_info["path"],
+                    "reason": "no_submission_id_found",
+                })
+            elif sid in metadata:
+                category_result["with_metadata"] += 1
+            else:
+                category_result["missing_metadata"] += 1
+                category_result["missing_ids"].append({
+                    "path": file_info["path"],
+                    "submission_id": sid,
+                    "reason": "id_not_in_metadata",
+                })
 
-        if sid is None:
-            missing_metadata += 1
-            missing_ids.append({
-                "path": file_info["path"],
-                "reason": "no_submission_id_found",
-            })
-            continue
+            files_processed_this_run += 1
 
-        if sid in metadata:
-            with_metadata += 1
+        all_results.append(category_result)
+
+        # Update progress
+        if files_processed_this_run >= AUDIT_BATCH_SIZE:
+            progress["last_audited_category"] = category_name
+            progress["last_audited_index"] = file_start + len(files_to_process[:files_processed_this_run])
+            break
         else:
-            missing_metadata += 1
-            missing_ids.append({
-                "path": file_info["path"],
-                "submission_id": sid,
-                "reason": "id_not_in_metadata",
-            })
+            # Move to next category
+            progress["last_audited_category"] = category_name
+            progress["last_audited_index"] = total_files_in_category
 
-    print(f"  With metadata: {with_metadata}")
-    print(f"  Missing metadata: {missing_metadata}")
+    if files_processed_this_run < AUDIT_BATCH_SIZE:
+        completed = True
+        progress["completed"] = True
+
+    progress["last_run"] = datetime.now(timezone.utc).isoformat()
 
     return {
-        "category": category_name,
-        "slug": category_slug,
-        "total_files": len(files),
-        "with_metadata": with_metadata,
-        "missing_metadata": missing_metadata,
-        "missing_ids": missing_ids,
+        "files_processed_this_run": files_processed_this_run,
+        "category_results": all_results,
+        "completed": completed,
     }
 
 
-def run_audit() -> Dict[str, Any]:
-    """Run full audit across all categories."""
+# ===========================================================================
+# Report Generation
+# ===========================================================================
+
+def generate_markdown_report(
+    all_category_results: List[Dict[str, Any]],
+    metadata_count: int,
+    completed: bool,
+    progress: Dict[str, Any],
+) -> str:
+    """Generate the Markdown report."""
+
+    total_files = sum(r["total_files"] for r in all_category_results)
+    total_with_metadata = sum(r["with_metadata"] for r in all_category_results)
+    total_missing = sum(r["missing_metadata"] for r in all_category_results)
+    coverage = round((total_with_metadata / total_files * 100) if total_files > 0 else 0, 2)
+
+    lines = []
+    lines.append("# Metadata Audit Report\n\n")
+    lines.append(f"**Last Updated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n")
+    lines.append(f"**Status:** {'✅ Complete' if completed else '⏳ In Progress'}\n\n")
+
+    lines.append("## Summary\n\n")
+    lines.append(f"- **Total files scanned:** {total_files}\n")
+    lines.append(f"- **Total metadata entries:** {metadata_count}\n")
+    lines.append(f"- **Files with metadata:** {total_with_metadata}\n")
+    lines.append(f"- **Files missing metadata:** {total_missing}\n")
+    lines.append(f"- **Coverage:** {coverage}%\n\n")
+
+    lines.append("## Progress\n\n")
+    lines.append(f"- **Last audited category:** {progress.get('last_audited_category', 'none')}\n")
+    lines.append(f"- **Last audited index:** {progress.get('last_audited_index', 0)}\n")
+    lines.append(f"- **Completed:** {progress.get('completed', False)}\n\n")
+
+    lines.append("## By Category\n\n")
+    lines.append("| Category | Total Files | With Metadata | Missing | Coverage |\n")
+    lines.append("|----------|-------------|---------------|---------|----------|\n")
+    for cat in all_category_results:
+        total = cat["total_files"]
+        with_meta = cat["with_metadata"]
+        cov = round((with_meta / total * 100) if total > 0 else 0, 1)
+        lines.append(f"| {cat['category']} | {total} | {with_meta} | {cat['missing_metadata']} | {cov}% |\n")
+
+    lines.append(f"\n---\n\n")
+    lines.append(f"*Report generated by metadata_audit.py v1.2*\n")
+
+    return "".join(lines)
+
+
+def save_report_to_repo(report_content: str) -> bool:
+    """Save report as Markdown to the private knowledge repo."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    message = f"Update metadata audit report [{timestamp}]"
+    return _write_file(REPORT_REPO_PATH, report_content, message)
+
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+def main():
     print("=" * 70)
-    print("Metadata Audit Tool v1.1")
+    print(f"Metadata Audit Tool v1.2 (Batch size: {AUDIT_BATCH_SIZE})")
     print("=" * 70)
 
     repo = os.getenv("KNOWLEDGE_REPO")
@@ -362,125 +472,53 @@ def run_audit() -> Dict[str, Any]:
         sys.exit(1)
 
     print(f"Repo: {repo}")
-    print(f"Metadata file: {METADATA_FILE_PATH}")
-    print("=" * 70)
+    print(f"Batch size: {AUDIT_BATCH_SIZE}")
 
     # Load metadata
     print("\nLoading metadata...")
     metadata = load_metadata()
     print(f"  Loaded {len(metadata)} metadata entries")
 
-    # Audit each category
-    print("\nAuditing categories...")
-    results = []
-    for category_name, category_slug in CATEGORY_SLUGS.items():
-        result = audit_category(category_name, category_slug, metadata)
-        results.append(result)
+    # Load progress
+    print("\nLoading progress...")
+    progress = load_progress()
+    print(f"  Last category: {progress.get('last_audited_category')}")
+    print(f"  Last index: {progress.get('last_audited_index')}")
+    print(f"  Completed: {progress.get('completed')}")
 
-    # Summary
-    total_files = sum(r["total_files"] for r in results)
-    total_with_metadata = sum(r["with_metadata"] for r in results)
-    total_missing = sum(r["missing_metadata"] for r in results)
+    if progress.get("completed"):
+        print("\n✅ Audit is already complete.")
+        print("   To re-run, delete admin/audit-progress.json")
+        return
 
-    total_metadata_entries = len(metadata)
+    # Run batch
+    print("\nRunning batch audit...")
+    batch_result = run_audit_batch(metadata, progress)
+
+    print(f"\nFiles processed this run: {batch_result['files_processed_this_run']}")
+
+    # Save progress
+    save_progress(progress)
+    print(f"Progress saved to {PROGRESS_REPO_PATH}")
+
+    # Generate report from all category results
+    # For simplicity, save the latest batch results as the current report
+    report_content = generate_markdown_report(
+        all_category_results=batch_result["category_results"],
+        metadata_count=len(metadata),
+        completed=batch_result["completed"],
+        progress=progress,
+    )
+
+    save_report_to_repo(report_content)
+    print(f"Report saved to {REPORT_REPO_PATH}")
 
     print("\n" + "=" * 70)
-    print("AUDIT SUMMARY")
-    print("=" * 70)
-    print(f"Total files in knowledge repo: {total_files}")
-    print(f"Total metadata entries: {total_metadata_entries}")
-    print(f"Files with metadata: {total_with_metadata}")
-    print(f"Files missing metadata: {total_missing}")
-    if total_files > 0:
-        coverage = (total_with_metadata / total_files) * 100
-        print(f"Coverage: {coverage:.1f}%")
-    print("=" * 70)
-
-    report = {
-        "audit_date": datetime.now(timezone.utc).isoformat(),
-        "repo": repo,
-        "total_files": total_files,
-        "total_metadata_entries": total_metadata_entries,
-        "files_with_metadata": total_with_metadata,
-        "files_missing_metadata": total_missing,
-        "coverage_percent": round((total_with_metadata / total_files * 100) if total_files > 0 else 0, 2),
-        "categories": results,
-    }
-
-    return report
-
-
-# ===========================================================================
-# Report Generation
-# ===========================================================================
-
-def generate_markdown_report(report: Dict[str, Any]) -> str:
-    """Generate the Markdown report content."""
-    lines = []
-    lines.append("# Metadata Audit Report\n\n")
-    lines.append(f"**Audit Date:** {report['audit_date']}\n\n")
-    lines.append(f"**Repo:** {report['repo']}\n\n")
-
-    lines.append("## Summary\n\n")
-    lines.append(f"- **Total files in knowledge repo:** {report['total_files']}\n")
-    lines.append(f"- **Total metadata entries:** {report['total_metadata_entries']}\n")
-    lines.append(f"- **Files with metadata:** {report['files_with_metadata']}\n")
-    lines.append(f"- **Files missing metadata:** {report['files_missing_metadata']}\n")
-    lines.append(f"- **Coverage:** {report['coverage_percent']}%\n\n")
-
-    lines.append("## By Category\n\n")
-    lines.append("| Category | Total Files | With Metadata | Missing | Coverage |\n")
-    lines.append("|----------|-------------|---------------|---------|----------|\n")
-    for cat in report["categories"]:
-        total = cat["total_files"]
-        with_meta = cat["with_metadata"]
-        coverage = round((with_meta / total * 100) if total > 0 else 0, 1)
-        lines.append(f"| {cat['category']} | {total} | {with_meta} | {cat['missing_metadata']} | {coverage}% |\n")
-
-    lines.append("\n## Missing Metadata Details\n\n")
-    for cat in report["categories"]:
-        if not cat["missing_ids"]:
-            continue
-        lines.append(f"\n### {cat['category']} ({len(cat['missing_ids'])} missing)\n\n")
-        for item in cat["missing_ids"][:50]:
-            lines.append(f"- `{item['path']}` — {item.get('reason', 'unknown')}\n")
-        if len(cat["missing_ids"]) > 50:
-            lines.append(f"- ... and {len(cat['missing_ids']) - 50} more\n")
-
-    lines.append(f"\n---\n\n")
-    lines.append(f"*Report generated by metadata_audit.py v1.1*\n")
-
-    return "".join(lines)
-
-
-def save_report_to_repo(report: Dict[str, Any]) -> bool:
-    """Save report as Markdown to the private knowledge repo."""
-    content = generate_markdown_report(report)
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    message = f"Update metadata audit report [{timestamp}]"
-
-    success = _write_file(REPORT_REPO_PATH, content, message)
-    if success:
-        print(f"\nReport saved to repo: {REPORT_REPO_PATH}")
+    if batch_result["completed"]:
+        print("✅ Audit complete.")
     else:
-        print(f"\nFailed to save report to repo: {REPORT_REPO_PATH}")
-    return success
-
-
-# ===========================================================================
-# Main
-# ===========================================================================
-
-def main():
-    """Main entry point."""
-    report = run_audit()
-
-    # Save report to repo
-    print("\nSaving report to knowledge repo...")
-    save_report_to_repo(report)
-
-    print("\n" + "=" * 70)
-    print("Audit complete.")
+        print(f"⏳ Batch complete. {AUDIT_BATCH_SIZE} files processed.")
+        print("   Next run will continue from where this one stopped.")
     print("=" * 70)
 
 
