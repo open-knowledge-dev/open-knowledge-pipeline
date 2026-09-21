@@ -1,11 +1,11 @@
 """
-Metadata Audit Tool — v1.0
+Metadata Audit Tool — v1.1
 ===========================
 Scans all knowledge files in the private knowledge repo and reports
 which ones are missing metadata in entry-metadata.jsonl.
 
-This is a READ-ONLY audit tool. It does not modify anything.
-It produces a report of files that need metadata backfill.
+This is a READ-ONLY audit tool for the knowledge files.
+It writes the report to admin/metadata_report.md in the private repo.
 
 Usage:
     python metadata_audit.py
@@ -16,8 +16,7 @@ Environment variables needed:
 
 Output:
     - Console report with summary
-    - metadata_report.json (detailed machine-readable report)
-    - metadata_report.md (human-readable summary)
+    - admin/metadata_report.md in the knowledge repo (committed)
 """
 
 import os
@@ -36,8 +35,7 @@ import time
 
 GITHUB_API = "https://api.github.com"
 METADATA_FILE_PATH = "admin/entry-metadata.jsonl"
-REPORT_JSON_PATH = "metadata_report.json"
-REPORT_MD_PATH = "metadata_report.md"
+REPORT_REPO_PATH = "admin/metadata_report.md"
 
 # Categories to scan
 CATEGORY_SLUGS = {
@@ -150,6 +148,16 @@ def _get_file_content(path: str) -> Optional[str]:
         return None
 
 
+def _get_file_sha(path: str) -> Optional[str]:
+    """Get SHA of a file from GitHub."""
+    repo = _get_repo()
+    url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
+    response = _github_request("GET", url)
+    if response is None or response.status_code != 200:
+        return None
+    return response.json().get("sha")
+
+
 def _list_directory(path: str) -> List[Dict[str, Any]]:
     """List contents of a directory in GitHub."""
     repo = _get_repo()
@@ -163,6 +171,27 @@ def _list_directory(path: str) -> List[Dict[str, Any]]:
     return []
 
 
+def _write_file(path: str, content: str, commit_message: str) -> bool:
+    """Write or update a file in the knowledge repo."""
+    repo = _get_repo()
+    url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
+
+    sha = _get_file_sha(path)
+
+    payload = {
+        "message": commit_message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+
+    response = _github_request("PUT", url, json=payload)
+    if response and response.status_code in [200, 201]:
+        return True
+    return False
+
+
 # ===========================================================================
 # Metadata Loading
 # ===========================================================================
@@ -171,7 +200,7 @@ def load_metadata() -> Dict[str, Dict[str, Any]]:
     """Load entry-metadata.jsonl and return a dict keyed by submission_id."""
     content = _get_file_content(METADATA_FILE_PATH)
     if not content:
-        print(f"  [Audit] ⚠️  entry-metadata.jsonl is empty or missing")
+        print(f"  [Audit] WARNING: entry-metadata.jsonl is empty or missing")
         return {}
 
     metadata = {}
@@ -189,7 +218,7 @@ def load_metadata() -> Dict[str, Dict[str, Any]]:
             errors.append(f"Line {i}: {e}")
 
     if errors:
-        print(f"  [Audit] ⚠️  {len(errors)} invalid lines in metadata file")
+        print(f"  [Audit] WARNING: {len(errors)} invalid lines in metadata file")
 
     return metadata
 
@@ -234,7 +263,6 @@ def extract_submission_id_from_filename(filename: str) -> Optional[str]:
 def extract_submission_id_from_content(content: str) -> Optional[str]:
     """Try to extract submission ID from file content (frontmatter)."""
     import re
-    # Look for patterns like "Submission ID: GHGPT-XXXX-YYYY"
     match = re.search(r'GHGPT-\d{4}-\d{4}', content)
     if match:
         return match.group(0)
@@ -288,7 +316,6 @@ def audit_category(category_name: str, category_slug: str, metadata: Dict[str, D
         sid = get_file_submission_id(file_info)
 
         if sid is None:
-            # No submission ID found — definitely missing metadata
             missing_metadata += 1
             missing_ids.append({
                 "path": file_info["path"],
@@ -306,8 +333,8 @@ def audit_category(category_name: str, category_slug: str, metadata: Dict[str, D
                 "reason": "id_not_in_metadata",
             })
 
-    print(f"  ✅ With metadata: {with_metadata}")
-    print(f"  ❌ Missing metadata: {missing_metadata}")
+    print(f"  With metadata: {with_metadata}")
+    print(f"  Missing metadata: {missing_metadata}")
 
     return {
         "category": category_name,
@@ -322,7 +349,7 @@ def audit_category(category_name: str, category_slug: str, metadata: Dict[str, D
 def run_audit() -> Dict[str, Any]:
     """Run full audit across all categories."""
     print("=" * 70)
-    print("Metadata Audit Tool v1.0")
+    print("Metadata Audit Tool v1.1")
     print("=" * 70)
 
     repo = os.getenv("KNOWLEDGE_REPO")
@@ -387,56 +414,57 @@ def run_audit() -> Dict[str, Any]:
 # Report Generation
 # ===========================================================================
 
-def save_json_report(report: Dict[str, Any]) -> bool:
-    """Save report as JSON."""
-    try:
-        with open(REPORT_JSON_PATH, "w") as f:
-            json.dump(report, f, indent=2)
-        print(f"\n✅ JSON report saved: {REPORT_JSON_PATH}")
-        return True
-    except Exception as e:
-        print(f"\n❌ Failed to save JSON report: {e}")
-        return False
+def generate_markdown_report(report: Dict[str, Any]) -> str:
+    """Generate the Markdown report content."""
+    lines = []
+    lines.append("# Metadata Audit Report\n\n")
+    lines.append(f"**Audit Date:** {report['audit_date']}\n\n")
+    lines.append(f"**Repo:** {report['repo']}\n\n")
+
+    lines.append("## Summary\n\n")
+    lines.append(f"- **Total files in knowledge repo:** {report['total_files']}\n")
+    lines.append(f"- **Total metadata entries:** {report['total_metadata_entries']}\n")
+    lines.append(f"- **Files with metadata:** {report['files_with_metadata']}\n")
+    lines.append(f"- **Files missing metadata:** {report['files_missing_metadata']}\n")
+    lines.append(f"- **Coverage:** {report['coverage_percent']}%\n\n")
+
+    lines.append("## By Category\n\n")
+    lines.append("| Category | Total Files | With Metadata | Missing | Coverage |\n")
+    lines.append("|----------|-------------|---------------|---------|----------|\n")
+    for cat in report["categories"]:
+        total = cat["total_files"]
+        with_meta = cat["with_metadata"]
+        coverage = round((with_meta / total * 100) if total > 0 else 0, 1)
+        lines.append(f"| {cat['category']} | {total} | {with_meta} | {cat['missing_metadata']} | {coverage}% |\n")
+
+    lines.append("\n## Missing Metadata Details\n\n")
+    for cat in report["categories"]:
+        if not cat["missing_ids"]:
+            continue
+        lines.append(f"\n### {cat['category']} ({len(cat['missing_ids'])} missing)\n\n")
+        for item in cat["missing_ids"][:50]:
+            lines.append(f"- `{item['path']}` — {item.get('reason', 'unknown')}\n")
+        if len(cat["missing_ids"]) > 50:
+            lines.append(f"- ... and {len(cat['missing_ids']) - 50} more\n")
+
+    lines.append(f"\n---\n\n")
+    lines.append(f"*Report generated by metadata_audit.py v1.1*\n")
+
+    return "".join(lines)
 
 
-def save_markdown_report(report: Dict[str, Any]) -> bool:
-    """Save report as Markdown."""
-    try:
-        lines = []
-        lines.append("# Metadata Audit Report\n")
-        lines.append(f"**Audit Date:** {report['audit_date']}\n")
-        lines.append(f"**Repo:** {report['repo']}\n")
-        lines.append("\n## Summary\n")
-        lines.append(f"- **Total files in knowledge repo:** {report['total_files']}\n")
-        lines.append(f"- **Total metadata entries:** {report['total_metadata_entries']}\n")
-        lines.append(f"- **Files with metadata:** {report['files_with_metadata']}\n")
-        lines.append(f"- **Files missing metadata:** {report['files_missing_metadata']}\n")
-        lines.append(f"- **Coverage:** {report['coverage_percent']}%\n")
+def save_report_to_repo(report: Dict[str, Any]) -> bool:
+    """Save report as Markdown to the private knowledge repo."""
+    content = generate_markdown_report(report)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    message = f"Update metadata audit report [{timestamp}]"
 
-        lines.append("\n## By Category\n")
-        lines.append("| Category | Total Files | With Metadata | Missing |\n")
-        lines.append("|----------|-------------|---------------|---------|\n")
-        for cat in report["categories"]:
-            lines.append(f"| {cat['category']} | {cat['total_files']} | {cat['with_metadata']} | {cat['missing_metadata']} |\n")
-
-        lines.append("\n## Missing Metadata Details\n")
-        for cat in report["categories"]:
-            if not cat["missing_ids"]:
-                continue
-            lines.append(f"\n### {cat['category']} ({len(cat['missing_ids'])} missing)\n")
-            for item in cat["missing_ids"][:50]:  # Limit to 50 per category
-                lines.append(f"- `{item['path']}` — {item.get('reason', 'unknown')}\n")
-            if len(cat["missing_ids"]) > 50:
-                lines.append(f"- ... and {len(cat['missing_ids']) - 50} more\n")
-
-        with open(REPORT_MD_PATH, "w") as f:
-            f.writelines(lines)
-
-        print(f"✅ Markdown report saved: {REPORT_MD_PATH}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to save Markdown report: {e}")
-        return False
+    success = _write_file(REPORT_REPO_PATH, content, message)
+    if success:
+        print(f"\nReport saved to repo: {REPORT_REPO_PATH}")
+    else:
+        print(f"\nFailed to save report to repo: {REPORT_REPO_PATH}")
+    return success
 
 
 # ===========================================================================
@@ -447,10 +475,9 @@ def main():
     """Main entry point."""
     report = run_audit()
 
-    # Save reports
-    print("\nSaving reports...")
-    save_json_report(report)
-    save_markdown_report(report)
+    # Save report to repo
+    print("\nSaving report to knowledge repo...")
+    save_report_to_repo(report)
 
     print("\n" + "=" * 70)
     print("Audit complete.")
