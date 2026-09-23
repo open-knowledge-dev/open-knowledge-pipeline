@@ -1,4 +1,4 @@
-name: Metadata Audit
+name: Metadata Audit & Backfill
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
 jobs:
   audit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -23,11 +23,11 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run metadata audit batch
+      - name: Run metadata audit & backfill
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           KNOWLEDGE_REPO: ${{ secrets.KNOWLEDGE_REPO }}
-          AUDIT_BATCH_SIZE: "2000"
+          AUDIT_BATCH_SIZE: "500"
         run: python metadata_audit.py
 
       - name: Summary
