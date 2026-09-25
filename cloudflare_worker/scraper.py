@@ -1,23 +1,28 @@
 """
-Cloudflare Workers AI Scraper — v4.0.0
+Cloudflare Workers AI Scraper — v5.0.0
 =====================================
 Uses Cloudflare Workers AI free tier to generate knowledge entries.
 Submits through the training form — same pipeline as all other scrapers.
+
+New in v5.0.0:
+- Human voice validation via human_voice_checker
+- Aggressive markdown stripping
+- Retry logic (3 attempts) on validation failure
+- Validation failures logged to admin/validation-failures.jsonl
+- Sentences capped at 20 words
+- No AI-sounding words
 
 Rate limiting built in:
 - MIN_DELAY 10s / MAX_DELAY 20s between entries
 - Exponential backoff on 429: 30s → 60s → skip
 - Random jitter 1-5s added to every delay
 - Per-minute cap: 5 requests/minute
-- Never exceeds Cloudflare rate limits
 
 Models: Clean models only — NO Llama/Meta
 - @cf/qwen/qwen3-30b-a3b-fp8 (Apache 2.0)
 - @cf/mistral/mistral-7b-instruct-v0.2-lora (Apache 2.0)
-- @cf/qwen/qwq-32b (Apache 2.0)
 
 Free tier: 10,000 requests/day
-Metadata logging for source tracking.
 """
 
 import os
@@ -25,16 +30,31 @@ import sys
 import re
 import time
 import random
+import json
+import base64
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Import human voice checker
+try:
+    from human_voice_checker import check_human_voice, strip_markdown_symbols
+    VALIDATOR_AVAILABLE = True
+except ImportError:
+    # Try parent directory
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from human_voice_checker import check_human_voice, strip_markdown_symbols
+        VALIDATOR_AVAILABLE = True
+    except ImportError:
+        VALIDATOR_AVAILABLE = False
+        print("[WARNING] human_voice_checker.py not found. Validation disabled.")
 
 # Import metadata logger
 try:
     from scraper_metadata import log_entry_metadata
     METADATA_AVAILABLE = True
 except ImportError:
-    # Try relative to parent (cloudflare_worker runs from different dir)
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from scraper_metadata import log_entry_metadata
@@ -56,6 +76,10 @@ from prompts import (
 )
 
 
+# ===========================================================================
+# Configuration
+# ===========================================================================
+
 ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
 API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
 
@@ -65,8 +89,12 @@ CATEGORY = os.environ.get("SCRAPER_CATEGORY", "Culture & Traditions")
 
 TRAINING_FORM_URL = os.environ.get("TRAINING_FORM_URL", "")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
+KNOWLEDGE_REPO = os.environ.get("KNOWLEDGE_REPO", "")
 
 BASE_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run"
+GITHUB_API = "https://api.github.com"
+VALIDATION_LOG_PATH = "admin/validation-failures.jsonl"
 
 ENTRIES_PER_RUN = int(os.environ.get("ENTRIES_PER_RUN", "10"))
 MIN_WORDS = int(os.environ.get("MIN_WORDS", "400"))
@@ -75,6 +103,7 @@ TEMPERATURE = 0.75
 MIN_DELAY = 10
 MAX_DELAY = 20
 REQUEST_TIMEOUT = 90
+MAX_RETRIES = 3
 
 # Rate limiting
 MAX_REQUESTS_PER_MINUTE = 5
@@ -83,6 +112,73 @@ request_timestamps = []
 # Prompt styles available
 PROMPT_STYLES = list(USER_PROMPT_TEMPLATES.keys())
 
+
+# ===========================================================================
+# Validation Failure Logging
+# ===========================================================================
+
+def _github_headers() -> dict:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
+    return headers
+
+
+def log_validation_failure(topic: str, category: str, reason: str, details: dict, content: str) -> None:
+    """Log a validation failure to the knowledge repo."""
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
+        print(f"   [Validation] Cannot log failure (no GitHub credentials)")
+        return
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scraper": "cloudflare_worker",
+        "model": MODEL,
+        "topic": topic,
+        "category": category,
+        "reason": reason,
+        "details": details,
+        "content_preview": content[:500] if content else "",
+    }
+
+    try:
+        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{VALIDATION_LOG_PATH}"
+
+        # Get current content
+        sha = ""
+        current_content = ""
+        try:
+            resp = requests.get(url, headers=_github_headers(), timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                sha = data.get("sha", "")
+                if data.get("content"):
+                    current_content = base64.b64decode(data["content"]).decode("utf-8")
+        except Exception:
+            pass
+
+        # Append new entry
+        new_line = json.dumps(entry) + "\n"
+        updated_content = current_content + new_line
+
+        # Write back
+        payload = {
+            "message": f"Log validation failure: {topic[:50]}",
+            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+        print(f"   [Validation] Failure logged to {VALIDATION_LOG_PATH}")
+    except Exception as e:
+        print(f"   [Validation] Failed to log: {e}")
+
+
+# ===========================================================================
+# Rate Limiting
+# ===========================================================================
 
 def enforce_rate_limit():
     """Ensure no more than MAX_REQUESTS_PER_MINUTE requests are made."""
@@ -100,6 +196,10 @@ def enforce_rate_limit():
 
     request_timestamps.append(time.time())
 
+
+# ===========================================================================
+# Content Generation
+# ===========================================================================
 
 def generate_entry(topic, system_prompt, user_prompt, model, retry_count=0):
     """Call Cloudflare Workers AI API with exponential backoff on 429."""
@@ -149,12 +249,6 @@ def generate_entry(topic, system_prompt, user_prompt, model, retry_count=0):
             if text is None:
                 print(f"  API returned null response")
                 return None
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = lines[1:] if lines else lines
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                text = "\n".join(lines)
             return text.strip()
         else:
             errors = data.get("errors", [])
@@ -169,32 +263,61 @@ def generate_entry(topic, system_prompt, user_prompt, model, retry_count=0):
         return None
 
 
+# ===========================================================================
+# Content Cleaning
+# ===========================================================================
+
 def clean_content(text):
-    """Clean generated text — remove common AI artifacts."""
+    """
+    Clean generated text — remove common AI artifacts.
+    Uses human_voice_checker if available, otherwise basic cleaning.
+    """
+    if not text:
+        return ""
+
+    # Remove common AI opening lines
     prefixes = [
-        "Here is a detailed",
-        "Here is an article",
-        "Here's a comprehensive",
-        "Here's an overview",
-        "Certainly!",
-        "Of course!",
-        "Below is a",
-        "The following is a",
+        "here is a detailed", "here is an article", "here's a comprehensive",
+        "here's an overview", "certainly!", "of course!", "below is a",
+        "the following is a", "here is a", "here's a",
     ]
+    text_lower = text.lower()
     for prefix in prefixes:
-        if text.lower().startswith(prefix.lower()):
+        if text_lower.startswith(prefix):
             first_break = text.find("\n\n")
             if first_break > 0:
                 text = text[first_break:].strip()
             break
 
+    # Remove AI self-references
     text = re.sub(
         r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
         '', text
     ).strip()
 
-    return text
+    # Aggressive markdown stripping
+    if VALIDATOR_AVAILABLE:
+        text = strip_markdown_symbols(text)
+    else:
+        # Fallback: basic markdown stripping
+        text = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', text)
+        text = re.sub(r'_{1,3}([^_]+?)_{1,3}', r'\1', text)
+        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^[\-\*\+]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'```[^`]*```', '', text)
+        text = re.sub(r'`([^`]+)`', r'\1', text)
+        text = re.sub(r'~~([^~]+?)~~', r'\1', text)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'\|', '', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
 
+    return text.strip()
+
+
+# ===========================================================================
+# Submission
+# ===========================================================================
 
 def submit_to_form(topic, category, knowledge, language="English"):
     """Submit knowledge to the training form."""
@@ -251,10 +374,14 @@ def submit_to_form(topic, category, knowledge, language="English"):
         return False, ""
 
 
+# ===========================================================================
+# Main Loop
+# ===========================================================================
+
 def run():
     """Main scraper loop."""
     print("=" * 60)
-    print("Cloudflare Workers AI Scraper v4.0.0")
+    print("Cloudflare Workers AI Scraper v5.0.0")
     print("=" * 60)
     print(f"Model: {MODEL}")
     print(f"Category: {CATEGORY}")
@@ -266,6 +393,8 @@ def run():
     print(f"Backoff: 30s → 60s → skip on 429")
     print(f"Banned orgs: {len(get_banned_orgs_list())} organizations blocked")
     print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
+    print(f"Human voice check: {'ENABLED' if VALIDATOR_AVAILABLE else 'DISABLED'}")
+    print(f"Max retries per entry: {MAX_RETRIES}")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -282,6 +411,7 @@ def run():
 
     successful = 0
     failed = 0
+    validation_rejected = 0
 
     for i, topic in enumerate(shuffled_topics[:ENTRIES_PER_RUN], 1):
         style = random.choice(PROMPT_STYLES)
@@ -292,21 +422,63 @@ def run():
         print(f"   Model: {MODEL} | Style: {style}")
         sys.stdout.flush()
 
-        content = generate_entry(topic, system_prompt, user_prompt, MODEL)
+        # Try up to MAX_RETRIES times
+        content = None
+        validation_passed = False
+        last_validation_details = {}
 
-        if content:
-            content = clean_content(content)
+        for attempt in range(MAX_RETRIES):
+            raw = generate_entry(topic, system_prompt, user_prompt, MODEL)
+
+            if not raw:
+                continue
+
+            cleaned = clean_content(raw)
+
+            if not VALIDATOR_AVAILABLE:
+                # No validator — accept as-is
+                content = cleaned
+                validation_passed = True
+                break
+
+            # Validate
+            passed, details = check_human_voice(cleaned)
+
+            if passed:
+                content = cleaned
+                validation_passed = True
+                break
+            else:
+                last_validation_details = details
+                print(f"   Attempt {attempt + 1} failed validation: {details['reasons']}")
+                sys.stdout.flush()
+                # Small delay before retry
+                time.sleep(5)
+
+        # After retries, decide
+        if not content:
+            failed += 1
+            print(f"   No response from API after {MAX_RETRIES} attempts")
+        elif not validation_passed:
+            validation_rejected += 1
+            print(f"   Rejected after {MAX_RETRIES} validation attempts")
+            # Log the failure
+            log_validation_failure(
+                topic=topic,
+                category=CATEGORY,
+                reason=",".join(last_validation_details.get("reasons", ["unknown"])),
+                details=last_validation_details.get("details", {}),
+                content=content,
+            )
+        else:
             word_count = len(content.split())
-
             if word_count >= MIN_WORDS:
-                success, submission_id = submit_to_form(
-                    topic, CATEGORY, content
-                )
+                success, submission_id = submit_to_form(topic, CATEGORY, content)
                 if success:
                     successful += 1
                     print(f"   {submission_id} ({word_count} words)")
 
-                    # Log metadata for source tracking
+                    # Log metadata
                     if METADATA_AVAILABLE:
                         try:
                             log_entry_metadata(
@@ -326,9 +498,6 @@ def run():
             else:
                 print(f"   Too short: {word_count} words (min {MIN_WORDS})")
                 failed += 1
-        else:
-            failed += 1
-            print(f"   No response from API")
 
         if i < ENTRIES_PER_RUN:
             base_delay = random.randint(MIN_DELAY, MAX_DELAY)
@@ -339,7 +508,7 @@ def run():
             time.sleep(total_delay)
 
     print(f"\n{'=' * 60}")
-    print(f"Done: {successful} submitted | {failed} failed")
+    print(f"Done: {successful} submitted | {failed} failed | {validation_rejected} rejected by validation")
     print("=" * 60)
     sys.stdout.flush()
 
