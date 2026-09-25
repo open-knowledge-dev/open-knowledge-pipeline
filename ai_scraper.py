@@ -1,5 +1,5 @@
 """
-AI-Powered Knowledge Scraper — v4.0.0
+AI-Powered Knowledge Scraper — v5.0.0
 ======================================
 Generates unique knowledge content using Cloudflare Qwen models (Apache 2.0).
 - Batch topic caching (25 topics per API call)
@@ -11,11 +11,12 @@ Generates unique knowledge content using Cloudflare Qwen models (Apache 2.0).
 - Deduplication feedback loop
 - Minimum 670 words per submission
 - Language variation (English)
-- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
+- Banned organization filtering
+- Human voice validation (no AI words, no markdown, max 20-word sentences)
 - Metadata logging for source tracking
 - Clean models only — NO Llama/Meta
 
-APIs: Cloudflare (primary), Mistral (fallback — 100 req/day)
+APIs: Cloudflare (primary), Mistral (fallback)
 Clean models: @cf/qwen/qwen3-30b-a3b-fp8, @cf/mistral/mistral-7b-instruct-v0.2-lora
 """
 
@@ -29,6 +30,14 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+
+# Import human voice checker
+try:
+    from human_voice_checker import check_human_voice, strip_markdown_symbols
+    VALIDATOR_AVAILABLE = True
+except ImportError:
+    VALIDATOR_AVAILABLE = False
+    print("[WARNING] human_voice_checker.py not found. Validation disabled.")
 
 # Import metadata logger
 try:
@@ -57,10 +66,12 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
 REQUEST_TIMEOUT = 90
+MAX_RETRIES = 3
 
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
+VALIDATION_LOG_PATH = "admin/validation-failures.jsonl"
 
 CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -87,35 +98,21 @@ COMPARISON_TOPIC_RATIO = 0.25
 
 
 # ===========================================================================
-# Banned Organizations — Never appear in generated content
+# Banned Organizations
 # ===========================================================================
 
 BANNED_ORGS = [
-    "FAO",
-    "Food and Agriculture Organization",
-    "WHO",
-    "World Health Organization",
-    "UN",
-    "United Nations",
-    "World Bank",
-    "IMF",
-    "International Monetary Fund",
-    "UNDP",
-    "UNESCO",
-    "UNICEF",
-    "USAID",
-    "DFID",
-    "GIZ",
-    "World Food Programme",
-    "WFP",
-    "International Labour Organization",
-    "ILO",
-    "World Trade Organization",
-    "WTO",
-    "African Development Bank",
-    "AfDB",
-    "European Union",
-    "EU"
+    "FAO", "Food and Agriculture Organization",
+    "WHO", "World Health Organization",
+    "UN", "United Nations",
+    "World Bank", "IMF", "International Monetary Fund",
+    "UNDP", "UNESCO", "UNICEF",
+    "USAID", "DFID", "GIZ",
+    "World Food Programme", "WFP",
+    "International Labour Organization", "ILO",
+    "World Trade Organization", "WTO",
+    "African Development Bank", "AfDB",
+    "European Union", "EU"
 ]
 
 BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
@@ -134,7 +131,6 @@ BANNED_TERMS = [
 
 
 def _check_banned_content(text: str) -> bool:
-    """Check if content contains banned organizations or terms. Returns True if clean."""
     text_lower = text.lower()
     for org in BANNED_ORGS:
         if org.lower() in text_lower:
@@ -148,7 +144,7 @@ def _check_banned_content(text: str) -> bool:
 
 
 # ===========================================================================
-# Language Variation — 70% English, 30% other major languages
+# Language Variation
 # ===========================================================================
 
 LANGUAGES = [
@@ -161,7 +157,7 @@ LANGUAGES = [
 
 
 # ===========================================================================
-# Prompt Styles — weighted toward compare-contrast for deeper content
+# Prompt Styles
 # ===========================================================================
 
 PROMPT_STYLES = [
@@ -174,13 +170,17 @@ PROMPT_STYLES = [
             "Be warm, encouraging, and practical. Never mention AI or language models. "
             "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
             "Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Explain "{topic}" in simple terms in {language}. '
             "Use examples from everyday life. Make it easy for anyone to understand. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -190,13 +190,17 @@ PROMPT_STYLES = [
             "Write in first person with warmth and authority. Share real stories and lessons. "
             "Your knowledge comes from living, not books. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Share your personal knowledge and experience about "{topic}" in {language}. '
             "Tell stories from real life. What have you learned? What works? What doesn't? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -208,6 +212,9 @@ PROMPT_STYLES = [
             "Help the reader understand which option works best in which situation. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -215,7 +222,8 @@ PROMPT_STYLES = [
             "What are the key differences? What are the pros and cons of each approach? "
             "Which one works better in different situations? Give specific examples. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -227,6 +235,9 @@ PROMPT_STYLES = [
             "Help the reader understand which option works best in which situation. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -234,25 +245,33 @@ PROMPT_STYLES = [
             "What are the key differences? What are the pros and cons of each approach? "
             "Which one works better in different situations? Give specific examples. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "step-by-step",
         "system": (
             "You are a skilled practitioner teaching a craft you have mastered over decades. "
-            "Give clear, numbered steps. Explain WHY each step matters. "
+            "Give clear steps, one after another in plain sentences. "
+            "Explain why each step matters. "
             "Include materials needed, time required, and difficulty level. "
             "Write in first person. Be precise and practical. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Do NOT use numbered lists. Write each step as its own short sentence or two. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Provide a complete step-by-step guide for "{topic}" in {language}. '
-            "Include: what you need before starting, each step numbered and explained, "
+            "Include what you need before starting, each step explained in short sentences, "
             "how long each step takes, and common mistakes to avoid. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Do NOT use numbered lists — just plain sentences. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -262,6 +281,9 @@ PROMPT_STYLES = [
             "Trace origins and changes. Show how the past connects to the present. "
             "Write in first person with rich detail. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -269,7 +291,8 @@ PROMPT_STYLES = [
             "How did it start? How has it changed over time? Where is it now? "
             "What forces shaped its development? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -279,13 +302,17 @@ PROMPT_STYLES = [
             "Share what goes wrong and how to avoid it. Be honest about failures. "
             "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'What are the most common mistakes people make with "{topic}" in {language}? '
             "For each mistake: explain what it is, why people make it, what happens as a result, "
             "and exactly how to avoid it. Be specific and practical. "
-            "Write at least 670 words. Use plain text only — no markdown formatting."
+            "Write at least 670 words. Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -295,6 +322,9 @@ PROMPT_STYLES = [
             "Describe local variations and explain why they exist. "
             "Write in first person with rich observation. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -302,7 +332,8 @@ PROMPT_STYLES = [
             "What are the local variations? Why do they exist? "
             "How do climate, culture, and available resources shape these differences? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -312,6 +343,9 @@ PROMPT_STYLES = [
             "Discuss trends, challenges, and opportunities. Be realistic but hopeful. "
             "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -319,7 +353,8 @@ PROMPT_STYLES = [
             "and what changes are coming in {language}. "
             "What should people prepare for? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
@@ -333,6 +368,9 @@ PROMPT_STYLES = [
             "Write in first person from real experience. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -345,31 +383,15 @@ PROMPT_STYLES = [
             "5) Common mistakes and how to recover from them, "
             "6) Tips from experience that make it easier or better. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
 ]
 
 
 # ===========================================================================
-# Markdown Stripping
-# ===========================================================================
-
-def strip_markdown(text: str) -> str:
-    """Remove all markdown formatting from AI-generated text."""
-    text = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', text)
-    text = re.sub(r'_{1,3}([^_]+?)_{1,3}', r'\1', text)
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[\-\*]\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```[^`]*```', '', text)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
-
-# ===========================================================================
-# State File Operations
+# Validation Failure Logging
 # ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
@@ -378,6 +400,57 @@ def _github_headers() -> Dict[str, str]:
         headers["Authorization"] = f"token {GH_TOKEN}"
     return headers
 
+
+def log_validation_failure(topic: str, category: str, reason: str, details: dict, content: str) -> None:
+    """Log a validation failure to the knowledge repo."""
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
+        return
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scraper": SCRAPER_NAME,
+        "model": CLOUDFLARE_MODEL if CLOUDFLARE_ACCOUNT_ID else "mistral-small-latest",
+        "topic": topic,
+        "category": category,
+        "reason": reason,
+        "details": details,
+        "content_preview": content[:500] if content else "",
+    }
+
+    try:
+        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{VALIDATION_LOG_PATH}"
+        sha = ""
+        current_content = ""
+        try:
+            resp = requests.get(url, headers=_github_headers(), timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                sha = data.get("sha", "")
+                if data.get("content"):
+                    current_content = base64.b64decode(data["content"]).decode("utf-8")
+        except Exception:
+            pass
+
+        new_line = json.dumps(entry) + "\n"
+        updated_content = current_content + new_line
+
+        payload = {
+            "message": f"Log validation failure: {topic[:50]}",
+            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+        print(f"  [Validation] Failure logged")
+    except Exception as e:
+        print(f"  [Validation] Failed to log: {e}")
+
+
+# ===========================================================================
+# State File Operations
+# ===========================================================================
 
 def _init_scraper_state(state: Dict) -> None:
     if SCRAPER_NAME not in state:
@@ -550,9 +623,9 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     system_prompt = (
         "You are a topic generator for a knowledge base about Africa. "
         f"Generate {num_regular} regular topics and {num_comparisons} comparison topics (total {TOPIC_CACHE_SIZE}). "
-        "Regular topics should be specific and narrow — something a real person would know from experience. "
-        "Comparison topics should compare two things — methods, tools, traditions, approaches. "
-        "Format comparison topics like 'X vs Y: which is better for...' or 'Differences between X and Y in...'. "
+        "Regular topics should be specific and narrow. "
+        "Comparison topics should compare two things. "
+        "Format comparison topics like 'X vs Y: which is better for...'. "
         "Return one topic per line. No numbering, no bullet points, no markdown. "
         "Each line must be a unique topic. "
         + BANNED_INSTRUCTION
@@ -652,11 +725,10 @@ def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
 
 
 # ===========================================================================
-# AI Content Generation — Cloudflare (Primary)
+# AI Content Generation — Cloudflare
 # ===========================================================================
 
 def generate_with_cloudflare(topic: str, style: Dict, language: str) -> str:
-    """Generate content using Cloudflare Workers AI."""
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return ""
 
@@ -703,11 +775,10 @@ def generate_with_cloudflare(topic: str, style: Dict, language: str) -> str:
 # ===========================================================================
 
 def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
-    """Generate content using Mistral API (fallback)."""
     if not MISTRAL_API_KEY:
         return ""
 
-    print(f"    [Mistral] Style: {style['name']} | Model: mistral-small-latest | Language: {language}")
+    print(f"    [Mistral] Style: {style['name']} | Language: {language}")
     sys.stdout.flush()
 
     user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
@@ -745,22 +816,38 @@ def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
         return ""
 
 
-def generate_content(topic: str, language: str) -> str:
+def generate_content(topic: str, language: str) -> Tuple[str, str]:
+    """Generate content with retry + validation. Returns (content, source)."""
     style = random.choice(PROMPT_STYLES)
+    source = ""
 
-    # Primary: Cloudflare
-    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-        content = generate_with_cloudflare(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+    for attempt in range(MAX_RETRIES):
+        raw = ""
 
-    # Fallback: Mistral
-    if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+        if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+            raw = generate_with_cloudflare(topic, style, language)
+            source = "cloudflare"
 
-    return ""
+        if not raw and MISTRAL_API_KEY:
+            raw = generate_with_mistral(topic, style, language)
+            source = "mistral"
+
+        if not raw:
+            continue
+
+        cleaned = strip_markdown_symbols(raw) if VALIDATOR_AVAILABLE else raw
+
+        if not VALIDATOR_AVAILABLE:
+            return cleaned, source
+
+        passed, details = check_human_voice(cleaned)
+        if passed and len(cleaned) >= MIN_CONTENT_LENGTH:
+            return cleaned, source
+
+        print(f"    Attempt {attempt + 1} validation: {details['reasons']}")
+        time.sleep(5)
+
+    return "", source
 
 
 # ===========================================================================
@@ -824,40 +911,30 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v4.0.0 — Cloudflare (Qwen) — {SCRAPER_NAME}")
+    print(f"AI Scraper v5.0.0 — Cloudflare (Qwen) — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Model: {CLOUDFLARE_MODEL}")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
-    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch")
-    print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
     print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'} (fallback)")
-    print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
-    print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
-    print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
+    print(f"Human voice check: {'ENABLED' if VALIDATOR_AVAILABLE else 'DISABLED'}")
     print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        if not MISTRAL_API_KEY:
-            print("ERROR: No AI providers configured (Cloudflare and Mistral both missing).")
-            return
-        print("WARNING: Cloudflare not configured. Using Mistral only (limited quota).")
+    if not CLOUDFLARE_ACCOUNT_ID and not MISTRAL_API_KEY:
+        print("ERROR: No AI providers configured.")
+        return
 
     state = load_state()
     _init_scraper_state(state)
     print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
-    cache_size = len(state.get(SCRAPER_NAME, {}).get('topic_cache', []))
-    cache_idx = state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
-    if cache_size > 0:
-        print(f"  Cached topics remaining: {cache_size - cache_idx}")
 
     submission_count = 0
     failed = 0
-    used_topics = []
+    validation_rejected = 0
 
     for i in range(max_submissions):
         if submission_count >= max_submissions:
@@ -873,56 +950,32 @@ def run_ai_scraper(max_submissions: int = 10):
 
         language = random.choice(LANGUAGES)
 
-        knowledge = generate_content(topic, language)
+        knowledge, source = generate_content(topic, language)
         if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed += 1
-            print(f"  Failed to generate content (got {len(knowledge) if knowledge else 0} chars)")
+            print(f"  Failed to generate valid content after {MAX_RETRIES} attempts")
             state = record_topic(state, topic, "", False)
-            continue
-
-        knowledge = strip_markdown(knowledge)
-        knowledge = re.sub(
-            r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
-            '', knowledge
-        ).strip()
-
-        if not _check_banned_content(knowledge):
-            failed += 1
-            print("  Failed: Content contains banned organizations after stripping")
-            state = record_topic(state, topic, "", False)
-            continue
-
-        if len(knowledge) < MIN_CONTENT_LENGTH:
-            failed += 1
-            state = record_topic(state, topic, "", False)
+            if knowledge:
+                log_validation_failure(topic, category, "validation_failed", {}, knowledge)
+                validation_rejected += 1
             continue
 
         print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
-        print(f"  Language: {language}")
+        print(f"  Source: {source}")
         sys.stdout.flush()
 
         success, submission_id = submit_to_form(topic, category, knowledge, language)
 
         if success:
             submission_count += 1
-            used_topics.append(topic)
             state = record_topic(state, topic, submission_id, True)
 
-            # Log metadata for source tracking
             if METADATA_AVAILABLE:
                 try:
-                    # Determine which provider was used
-                    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-                        source = "cloudflare"
-                        model = CLOUDFLARE_MODEL
-                    else:
-                        source = "mistral"
-                        model = "mistral-small-latest"
-
                     log_entry_metadata(
                         submission_id=submission_id,
                         source=source,
-                        model=model,
+                        model=CLOUDFLARE_MODEL if source == "cloudflare" else "mistral-small-latest",
                         type="ai",
                         category=category,
                         email=""
@@ -946,9 +999,7 @@ def run_ai_scraper(max_submissions: int = 10):
             time.sleep(wait_time)
 
     print("\n" + "=" * 60)
-    print(f"Done: {submission_count} submitted | {failed} failed")
-    cache_remaining = len(state.get(SCRAPER_NAME, {}).get('topic_cache', [])) - state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
-    print(f"Cache remaining: {max(0, cache_remaining)}")
+    print(f"Done: {submission_count} submitted | {failed} failed | {validation_rejected} rejected")
     print("=" * 60)
 
 
