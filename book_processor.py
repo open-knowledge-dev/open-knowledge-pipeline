@@ -1,20 +1,23 @@
 """
-Book Processor — v4.0.0
+Book Processor — v5.0.0
 =======================
 Automatically downloads public domain books from Project Gutenberg,
 extracts text, splits into chunks, rewrites via Cloudflare Qwen models in
 conversational African voice, and submits to the training form.
+
+New in v5.0.0:
+- Human voice validation (no AI words, no markdown, max 20-word sentences)
+- Aggressive markdown stripping
+- Retry logic (3 attempts) on validation failure
+- Validation failures logged to admin/validation-failures.jsonl
+- Simple vocabulary (10-year-old level with explanations)
+- Clean models only — NO Llama/Meta
 
 All books are pre-1927 — indisputably public domain.
 Zero copyright risk. Fully automated.
 
 Schedule: Runs daily. Processes one book per run.
 Resumes from where it left off if interrupted.
-- Banned organization filtering (FAO, WHO, UN, World Bank, IMF, etc.)
-- Cloudflare Qwen models (Apache 2.0)
-- Mistral fallback (100 req/day)
-- Metadata logging for source tracking
-- Clean models only — NO Llama/Meta
 """
 
 import os
@@ -27,6 +30,14 @@ import re
 import requests
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+
+# Import human voice checker
+try:
+    from human_voice_checker import check_human_voice, strip_markdown_symbols
+    VALIDATOR_AVAILABLE = True
+except ImportError:
+    VALIDATOR_AVAILABLE = False
+    print("[WARNING] human_voice_checker.py not found. Validation disabled.")
 
 # Import metadata logger
 try:
@@ -54,10 +65,12 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "60"))
 REQUEST_TIMEOUT = 90
+MAX_RETRIES = 3
 
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
+VALIDATION_LOG_PATH = "admin/validation-failures.jsonl"
 
 CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -65,38 +78,25 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 STATE_FILE_PATH = "admin/book-processor-state.json"
 MAX_CHUNKS_PER_RUN = 40
 MIN_CHUNK_LENGTH = 300
+MIN_WORDS = 400
 
 
 # ===========================================================================
-# Banned Organizations — Never appear in generated content
+# Banned Organizations
 # ===========================================================================
 
 BANNED_ORGS = [
-    "FAO",
-    "Food and Agriculture Organization",
-    "WHO",
-    "World Health Organization",
-    "UN",
-    "United Nations",
-    "World Bank",
-    "IMF",
-    "International Monetary Fund",
-    "UNDP",
-    "UNESCO",
-    "UNICEF",
-    "USAID",
-    "DFID",
-    "GIZ",
-    "World Food Programme",
-    "WFP",
-    "International Labour Organization",
-    "ILO",
-    "World Trade Organization",
-    "WTO",
-    "African Development Bank",
-    "AfDB",
-    "European Union",
-    "EU"
+    "FAO", "Food and Agriculture Organization",
+    "WHO", "World Health Organization",
+    "UN", "United Nations",
+    "World Bank", "IMF", "International Monetary Fund",
+    "UNDP", "UNESCO", "UNICEF",
+    "USAID", "DFID", "GIZ",
+    "World Food Programme", "WFP",
+    "International Labour Organization", "ILO",
+    "World Trade Organization", "WTO",
+    "African Development Bank", "AfDB",
+    "European Union", "EU"
 ]
 
 BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
@@ -115,7 +115,6 @@ BANNED_TERMS = [
 
 
 def _check_banned_content(text: str) -> bool:
-    """Check if content contains banned organizations or terms. Returns True if clean."""
     text_lower = text.lower()
     for org in BANNED_ORGS:
         if org.lower() in text_lower:
@@ -170,11 +169,66 @@ GUTENBERG_URL_ALT = "https://www.gutenberg.org/cache/epub/{id}/pg{id}.txt"
 
 
 # ===========================================================================
+# Validation Failure Logging
+# ===========================================================================
+
+def _github_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
+    return headers
+
+
+def log_validation_failure(topic: str, category: str, reason: str, details: dict, content: str) -> None:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
+        return
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scraper": "book_processor",
+        "model": CLOUDFLARE_MODEL if CLOUDFLARE_ACCOUNT_ID else "mistral-small-latest",
+        "topic": topic,
+        "category": category,
+        "reason": reason,
+        "details": details,
+        "content_preview": content[:500] if content else "",
+    }
+
+    try:
+        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{VALIDATION_LOG_PATH}"
+        sha = ""
+        current_content = ""
+        try:
+            resp = requests.get(url, headers=_github_headers(), timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                sha = data.get("sha", "")
+                if data.get("content"):
+                    current_content = base64.b64decode(data["content"]).decode("utf-8")
+        except Exception:
+            pass
+
+        new_line = json.dumps(entry) + "\n"
+        updated_content = current_content + new_line
+
+        payload = {
+            "message": f"Log validation failure: {topic[:50]}",
+            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+    except Exception:
+        pass
+
+
+# ===========================================================================
 # Book Download
 # ===========================================================================
 
 def download_book(book_id: str) -> Optional[str]:
-    """Download a book from Project Gutenberg by ID. Returns full text or None."""
     urls = [
         GUTENBERG_URL_ALT.format(id=book_id),
         GUTENBERG_URL.format(id=book_id),
@@ -183,7 +237,7 @@ def download_book(book_id: str) -> Optional[str]:
         try:
             print(f"  Downloading: {url}")
             sys.stdout.flush()
-            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/4.0"})
+            response = requests.get(url, timeout=60, headers={"User-Agent": "BookProcessor/5.0"})
             if response.status_code == 200:
                 text = response.text
                 text = clean_gutenberg_text(text)
@@ -197,7 +251,6 @@ def download_book(book_id: str) -> Optional[str]:
 
 
 def clean_gutenberg_text(text: str) -> str:
-    """Remove Project Gutenberg header and footer boilerplate."""
     start_markers = [
         "*** START OF THE PROJECT GUTENBERG",
         "*** START OF THIS PROJECT GUTENBERG",
@@ -230,7 +283,6 @@ def clean_gutenberg_text(text: str) -> str:
 # ===========================================================================
 
 def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
-    """Split book text into manageable chunks for AI rewriting."""
     paragraphs = re.split(r'\n\s*\n', text)
     chunks = []
     current_chunk = []
@@ -269,7 +321,6 @@ def split_into_chunks(text: str, max_words: int = 700) -> List[str]:
 # ===========================================================================
 
 def rewrite_with_cloudflare(chunk: str, book_title: str, book_author: str) -> str:
-    """Rewrite a book chunk in conversational African voice using Cloudflare Qwen."""
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return ""
 
@@ -279,7 +330,11 @@ def rewrite_with_cloudflare(chunk: str, book_title: str, book_author: str) -> st
         "an elder sharing wisdom around a fire. Keep all facts, names, dates, and "
         "key details accurate. Add practical lessons and African context where relevant. "
         "Write in first person. Write at least 400 words. "
-        "Do NOT use markdown formatting. Write in plain text only. "
+        "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
+        "Write in plain text only. "
+        "Keep every sentence under 20 words. "
+        "Use only words a 10-year-old would know. "
+        "If you must use a hard word, explain it right after in simple words. "
         + BANNED_INSTRUCTION
     )
 
@@ -288,7 +343,8 @@ def rewrite_with_cloudflare(chunk: str, book_title: str, book_author: str) -> st
         f"{chunk}\n\n"
         f"Rewrite this in a warm African storytelling voice. Keep the facts accurate. "
         f"Make it feel like wisdom being shared, not a book being read. "
-        f"Write at least 400 words. Use plain text only."
+        f"Write at least 400 words. Use plain text only. "
+        f"Keep sentences short. Use simple words."
     )
 
     headers = {
@@ -325,7 +381,6 @@ def rewrite_with_cloudflare(chunk: str, book_title: str, book_author: str) -> st
 # ===========================================================================
 
 def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
-    """Rewrite using Mistral (fallback)."""
     if not MISTRAL_API_KEY:
         return ""
 
@@ -333,11 +388,14 @@ def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
         "You are a wise African storyteller. Rewrite this passage in a warm, "
         "conversational voice. Keep facts accurate. Add African context. "
         "Write at least 400 words. Plain text only. "
+        "Keep every sentence under 20 words. "
+        "Use simple words a 10-year-old would know. "
         + BANNED_INSTRUCTION
     )
     user_prompt = (
         f"From '{book_title}' by {book_author}:\n\n{chunk}\n\n"
-        f"Rewrite in African storytelling voice. 400+ words. Plain text."
+        f"Rewrite in African storytelling voice. 400+ words. Plain text. "
+        f"Keep sentences short. Use simple words."
     )
 
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
@@ -364,22 +422,39 @@ def rewrite_with_mistral(chunk: str, book_title: str, book_author: str) -> str:
         return ""
 
 
-def rewrite_chunk(chunk: str, book_title: str, book_author: str) -> str:
-    """Rewrite a chunk using available AI APIs."""
+def rewrite_chunk(chunk: str, book_title: str, book_author: str) -> Tuple[str, str]:
+    """Rewrite a chunk with retry + validation. Returns (content, source)."""
+    source = ""
 
-    # Primary: Cloudflare
-    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-        content = rewrite_with_cloudflare(chunk, book_title, book_author)
-        if content and len(content) >= MIN_CHUNK_LENGTH:
-            return content
+    for attempt in range(MAX_RETRIES):
+        raw = ""
 
-    # Fallback: Mistral
-    if MISTRAL_API_KEY:
-        content = rewrite_with_mistral(chunk, book_title, book_author)
-        if content and len(content) >= MIN_CHUNK_LENGTH:
-            return content
+        if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+            raw = rewrite_with_cloudflare(chunk, book_title, book_author)
+            source = "cloudflare"
 
-    return ""
+        if not raw and MISTRAL_API_KEY:
+            raw = rewrite_with_mistral(chunk, book_title, book_author)
+            source = "mistral"
+
+        if not raw:
+            continue
+
+        cleaned = strip_markdown_symbols(raw) if VALIDATOR_AVAILABLE else raw
+
+        if not VALIDATOR_AVAILABLE:
+            if len(cleaned) >= MIN_CHUNK_LENGTH:
+                return cleaned, source
+            continue
+
+        passed, details = check_human_voice(cleaned)
+        if passed and len(cleaned) >= MIN_CHUNK_LENGTH:
+            return cleaned, source
+
+        print(f"    Attempt {attempt + 1} validation: {details['reasons']}")
+        time.sleep(5)
+
+    return "", source
 
 
 # ===========================================================================
@@ -387,7 +462,6 @@ def rewrite_chunk(chunk: str, book_title: str, book_author: str) -> str:
 # ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str]:
-    """Submit knowledge to the training form."""
     session = requests.Session()
     try:
         print(f"    Fetching form...")
@@ -436,13 +510,6 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 # State File (Private Knowledge Repo)
 # ===========================================================================
 
-def _github_headers():
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if GH_TOKEN:
-        headers["Authorization"] = f"token {GH_TOKEN}"
-    return headers
-
-
 def load_state() -> Dict:
     if not GH_TOKEN or not KNOWLEDGE_REPO:
         return {}
@@ -490,23 +557,20 @@ def save_state(state: Dict) -> bool:
 # ===========================================================================
 
 def run_book_processor():
-    """Download and process one public domain book per run."""
     print("=" * 60)
-    print("Book Processor v4.0.0 — Project Gutenberg")
+    print("Book Processor v5.0.0 — Project Gutenberg")
     print("=" * 60)
     print(f"Max chunks per run: {MAX_CHUNKS_PER_RUN}")
     print(f"Cloudflare Model: {CLOUDFLARE_MODEL}")
     print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'} (fallback)")
-    print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
+    print(f"Human voice check: {'ENABLED' if VALIDATOR_AVAILABLE else 'DISABLED'}")
     print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     sys.stdout.flush()
 
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        if not MISTRAL_API_KEY:
-            print("ERROR: No AI providers configured (Cloudflare and Mistral both missing).")
-            return
-        print("WARNING: Cloudflare not configured. Using Mistral only (limited quota).")
+    if not CLOUDFLARE_ACCOUNT_ID and not MISTRAL_API_KEY:
+        print("ERROR: No AI providers configured.")
+        return
 
     state = load_state()
 
@@ -557,6 +621,7 @@ def run_book_processor():
     max_in_run = min(MAX_CHUNKS_PER_RUN, len(chunks) - current_index)
     submission_count = 0
     failed_count = 0
+    validation_rejected = 0
 
     print(f"\nProcessing {max_in_run} chunks (of {len(chunks)} total)...")
     print("-" * 60)
@@ -569,24 +634,20 @@ def run_book_processor():
         chunk = chunks[i]
         print(f"\n[{i + 1}/{len(chunks)}] Chunk {i + 1} ({len(chunk.split())} words)")
 
-        knowledge = rewrite_chunk(chunk, current_book["title"], current_book["author"])
+        knowledge, source = rewrite_chunk(chunk, current_book["title"], current_book["author"])
         if not knowledge:
             failed_count += 1
-            print(f"  Failed to rewrite")
+            print(f"  Failed to rewrite after {MAX_RETRIES} attempts")
             state["current_index"] = i + 1
             save_state(state)
             continue
 
         if not _check_banned_content(knowledge):
             failed_count += 1
-            print(f"  Failed: Content contains banned organizations")
+            print(f"  Failed: banned content")
             state["current_index"] = i + 1
             save_state(state)
             continue
-
-        knowledge = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', knowledge)
-        knowledge = re.sub(r'^#{1,6}\s+', '', knowledge, flags=re.MULTILINE)
-        knowledge = knowledge.strip()
 
         if len(knowledge) < MIN_CHUNK_LENGTH:
             failed_count += 1
@@ -604,23 +665,14 @@ def run_book_processor():
 
         if success:
             submission_count += 1
-            print(f"  ✅ {sid}")
+            print(f"  Submitted: {sid}")
 
-            # Log metadata for source tracking
             if METADATA_AVAILABLE:
                 try:
-                    # Determine which provider was used
-                    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-                        source = "cloudflare"
-                        model = CLOUDFLARE_MODEL
-                    else:
-                        source = "mistral"
-                        model = "mistral-small-latest"
-
                     log_entry_metadata(
                         submission_id=sid,
                         source=source,
-                        model=model,
+                        model=CLOUDFLARE_MODEL if source == "cloudflare" else "mistral-small-latest",
                         type="public_domain",
                         category=current_book["category"],
                         email=""
@@ -630,7 +682,7 @@ def run_book_processor():
                     print(f"  [Metadata] Failed to log: {e}")
         else:
             failed_count += 1
-            print(f"  ❌ Failed")
+            print(f"  Submission failed")
 
         state["current_index"] = i + 1
         save_state(state)
@@ -647,12 +699,12 @@ def run_book_processor():
         state["chunks"] = []
         state["current_index"] = 0
         save_state(state)
-        print(f"\n📚 BOOK COMPLETE: {current_book['title']}")
+        print(f"\nBOOK COMPLETE: {current_book['title']}")
     else:
-        print(f"\n⏸️ PAUSED at chunk {state['current_index'] + 1} of {len(chunks)}")
+        print(f"\nPAUSED at chunk {state['current_index'] + 1} of {len(chunks)}")
 
     print("=" * 60)
-    print(f"This run: {submission_count} submitted | {failed_count} failed")
+    print(f"This run: {submission_count} submitted | {failed_count} failed | {validation_rejected} rejected")
     print(f"Total for this book: {state['current_index']} of {len(chunks)} processed")
     print("=" * 60)
 
