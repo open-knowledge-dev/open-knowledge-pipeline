@@ -1,26 +1,19 @@
 """
-AI-Powered Knowledge Scraper — Environment & Nature — v4.0.0
+AI-Powered Knowledge Scraper — Environment & Nature — v5.0.0
 =============================================================
 Dedicated scraper for Environment & Nature knowledge using Cloudflare Qwen models.
 Focuses on climate, conservation, renewable energy, water management,
-waste management, biodiversity, and sustainability topics with
-West African and Ghanaian context.
+waste management, biodiversity, and sustainability topics.
 
-Features:
-- Batch topic caching (25 topics per API call)
-- Comparison topics (~25% of output for deeper content)
-- 10 rotating prompt styles with compare-contrast weighted higher
-- State file memory to avoid repeats
-- Markdown stripping for clean output
-- Deduplication feedback loop
-- Minimum 670 words per submission
-- Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
-- AI writes in the target language
-- Banned organization filtering
-- Metadata logging for source tracking
+New in v5.0.0:
+- Human voice validation (no AI words, no markdown, max 20-word sentences)
+- Aggressive markdown stripping
+- Retry logic (3 attempts) on validation failure
+- Validation failures logged to admin/validation-failures.jsonl
+- Simple vocabulary (10-year-old level with explanations)
 - Clean models only — NO Llama/Meta
 
-APIs: Cloudflare (primary), Mistral (fallback — 100 req/day)
+APIs: Cloudflare (primary), Mistral (fallback)
 Clean models: @cf/qwen/qwen3-30b-a3b-fp8, @cf/mistral/mistral-7b-instruct-v0.2-lora
 Schedule: Every 4 hours via GitHub Actions
 """
@@ -35,6 +28,14 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+
+# Import human voice checker
+try:
+    from human_voice_checker import check_human_voice, strip_markdown_symbols
+    VALIDATOR_AVAILABLE = True
+except ImportError:
+    VALIDATOR_AVAILABLE = False
+    print("[WARNING] human_voice_checker.py not found. Validation disabled.")
 
 # Import metadata logger
 try:
@@ -63,10 +64,12 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SUBMISSIONS_PER_RUN = int(os.getenv("SUBMISSIONS_PER_RUN", "10"))
 SUBMISSION_DELAY = int(os.getenv("SUBMISSION_DELAY", "30"))
 REQUEST_TIMEOUT = 90
+MAX_RETRIES = 3
 
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 KNOWLEDGE_REPO = os.getenv("KNOWLEDGE_REPO", "")
 GITHUB_API = "https://api.github.com"
+VALIDATION_LOG_PATH = "admin/validation-failures.jsonl"
 
 CLOUDFLARE_API_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}" if CLOUDFLARE_ACCOUNT_ID else ""
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -92,35 +95,21 @@ COMPARISON_TOPIC_RATIO = 0.25
 
 
 # ===========================================================================
-# Banned Organizations — Never appear in generated content
+# Banned Organizations
 # ===========================================================================
 
 BANNED_ORGS = [
-    "FAO",
-    "Food and Agriculture Organization",
-    "WHO",
-    "World Health Organization",
-    "UN",
-    "United Nations",
-    "World Bank",
-    "IMF",
-    "International Monetary Fund",
-    "UNDP",
-    "UNESCO",
-    "UNICEF",
-    "USAID",
-    "DFID",
-    "GIZ",
-    "World Food Programme",
-    "WFP",
-    "International Labour Organization",
-    "ILO",
-    "World Trade Organization",
-    "WTO",
-    "African Development Bank",
-    "AfDB",
-    "European Union",
-    "EU"
+    "FAO", "Food and Agriculture Organization",
+    "WHO", "World Health Organization",
+    "UN", "United Nations",
+    "World Bank", "IMF", "International Monetary Fund",
+    "UNDP", "UNESCO", "UNICEF",
+    "USAID", "DFID", "GIZ",
+    "World Food Programme", "WFP",
+    "International Labour Organization", "ILO",
+    "World Trade Organization", "WTO",
+    "African Development Bank", "AfDB",
+    "European Union", "EU"
 ]
 
 BANNED_ORGS_STRING = ", ".join(BANNED_ORGS)
@@ -139,7 +128,6 @@ BANNED_TERMS = [
 
 
 def _check_banned_content(text: str) -> bool:
-    """Check if content contains banned organizations or terms. Returns True if clean."""
     text_lower = text.lower()
     for org in BANNED_ORGS:
         if org.lower() in text_lower:
@@ -166,7 +154,7 @@ LANGUAGES = [
 
 
 # ===========================================================================
-# Prompt Styles
+# Prompt Styles — Human Voice Edition
 # ===========================================================================
 
 PROMPT_STYLES = [
@@ -174,158 +162,185 @@ PROMPT_STYLES = [
         "name": "explain-simply",
         "system": (
             "You are a patient teacher explaining environmental topics to a curious 15-year-old. "
-            "Use simple words, real examples from nature and daily life, and make it easy to understand. "
+            "Use simple words, real examples from nature and daily life. "
             "Write in first person as if sharing knowledge you learned from living close to the land. "
             "Be warm, encouraging, and practical. Never mention AI or language models. "
             "Do NOT use markdown formatting — no asterisks, no hashes, no underscores. "
             "Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Explain "{topic}" in simple terms in {language}. '
             "Use examples from nature and everyday life. Make it easy for anyone to understand. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "personal-story",
         "system": (
             "You are an elder who has spent a lifetime observing the natural world. "
-            "Write in first person with warmth and authority. Share real stories about the environment, "
-            "weather patterns, wildlife, and how communities live with nature. "
+            "Write in first person with warmth and authority. Share real stories about the environment. "
             "Your knowledge comes from living close to the land, not books. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Share your personal knowledge and experience about "{topic}" in {language}. '
             "Tell stories from real life. What have you observed? What has changed over time? "
-            "What works? What doesn't? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "compare-contrast",
         "system": (
-            "You are an environmental analyst who compares different approaches to conservation, "
-            "energy, and land management. Write in first person. Show pros and cons of different methods. "
+            "You are an environmental analyst who compares different approaches to conservation. "
+            "Write in first person. Show pros and cons of different methods. "
             "Be fair and balanced. Give specific examples from West Africa and beyond. "
-            "Help the reader understand which approach works best in which situation. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Compare and contrast "{topic}" in {language}. '
             "What are the key differences? What are the pros and cons of each approach? "
-            "Which one works better in different environments or situations? Give specific examples. "
+            "Give specific examples. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "compare-contrast",
         "system": (
-            "You are an environmental analyst who compares different approaches to conservation, "
-            "energy, and land management. Write in first person. Show pros and cons of different methods. "
+            "You are an environmental analyst who compares different approaches to conservation. "
+            "Write in first person. Show pros and cons of different methods. "
             "Be fair and balanced. Give specific examples from West Africa and beyond. "
-            "Help the reader understand which approach works best in which situation. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Compare and contrast "{topic}" in {language}. '
             "What are the key differences? What are the pros and cons of each approach? "
-            "Which one works better in different environments or situations? Give specific examples. "
+            "Give specific examples. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "step-by-step",
         "system": (
-            "You are a conservation practitioner who has restored land, planted trees, "
-            "and managed natural resources for decades. Give clear, numbered steps. "
-            "Explain WHY each step matters for the environment. "
-            "Include materials needed, time required, and difficulty level. "
+            "You are a conservation practitioner who has restored land and planted trees for decades. "
+            "Give clear steps, one after another in plain sentences. "
+            "Explain why each step matters for the environment. "
             "Write in first person. Be precise and practical. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Do NOT use numbered lists. Write each step as its own short sentence or two. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Provide a complete step-by-step guide for "{topic}" in {language}. '
-            "Include: what you need before starting, each step numbered and explained, "
+            "Include what you need before starting, each step explained in short sentences, "
             "how long each step takes, and common mistakes to avoid. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Do NOT use numbered lists — just plain sentences. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "historical-context",
         "system": (
-            "You are an environmental historian who understands how landscapes, "
-            "ecosystems, and climate have changed over time. "
-            "Trace the evolution of environmental conditions and human relationships with nature. "
-            "Show how the past connects to present environmental challenges. "
+            "You are an environmental historian who understands how landscapes changed over time. "
+            "Trace the evolution of environmental conditions. "
+            "Show how the past connects to present challenges. "
             "Write in first person with rich detail. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Trace the history and evolution of "{topic}" in {language}. '
             "How did it start? How has it changed over time? Where is it now? "
-            "What forces shaped its development? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "common-mistakes",
         "system": (
-            "You are a seasoned environmental expert who has seen people make every mistake possible "
-            "in managing natural resources. Share what goes wrong and how to avoid it. "
-            "Be honest about failures and their environmental consequences. "
+            "You are a seasoned environmental expert who has seen people make every mistake. "
+            "Share what goes wrong and how to avoid it. Be honest about failures. "
             "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'What are the most common mistakes people make with "{topic}" in {language}? '
             "For each mistake: explain what it is, why people make it, what happens as a result, "
             "and exactly how to avoid it. Be specific and practical. "
-            "Write at least 670 words. Use plain text only — no markdown formatting."
+            "Write at least 670 words. Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "regional-variations",
         "system": (
-            "You are a well-traveled environmental observer who notices how ecosystems, "
-            "climate, and conservation practices differ across regions. "
-            "Describe local variations in environmental conditions and explain why they exist. "
+            "You are a well-traveled environmental observer who notices how ecosystems differ. "
+            "Describe local variations and explain why they exist. "
             "Write in first person with rich observation. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
             'Describe how "{topic}" differs across regions in {language}. '
             "What are the local variations? Why do they exist? "
-            "How do climate, geography, and human activity shape these differences? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "future-outlook",
         "system": (
             "You are a forward-thinking environmental expert who sees where the planet is heading. "
-            "Discuss climate trends, conservation challenges, and opportunities for a sustainable future. "
-            "Be realistic but hopeful. Focus on solutions that communities can implement. "
+            "Discuss climate trends and solutions that communities can use. "
+            "Be realistic but hopeful. "
             "Write in first person. Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -333,21 +348,23 @@ PROMPT_STYLES = [
             "and what changes are coming in {language}. "
             "What should communities prepare for? What solutions exist? "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
     {
         "name": "practical-guide",
         "system": (
-            "You are a skilled environmental practitioner who has done conservation work, "
-            "tree planting, water management, and waste reduction hundreds of times. "
-            "You know every technique, shortcut, and pitfall. "
+            "You are a skilled environmental practitioner who has done conservation work hundreds of times. "
             "Give clear, actionable instructions that anyone can follow. "
-            "Include what materials or preparation is needed, how long it takes, "
+            "Include what materials are needed, how long it takes, "
             "the difficulty level, and what to do when things go wrong. "
             "Write in first person from real experience. "
             "Never mention AI or language models. "
             "Do NOT use markdown formatting. Write in plain text only. "
+            "Keep every sentence under 20 words. "
+            "Use only words a 10-year-old would know. "
+            "If you must use a hard word, explain it right after in simple words. "
             + BANNED_INSTRUCTION
         ),
         "user_template": (
@@ -360,7 +377,8 @@ PROMPT_STYLES = [
             "5) Common mistakes and how to recover from them, "
             "6) Tips from experience that make it easier or better. "
             "Be thorough and detailed. Write at least 670 words. "
-            "Use plain text only — no markdown formatting."
+            "Use plain text only — no markdown formatting. "
+            "Keep sentences short. Use simple words."
         ),
     },
 ]
@@ -391,17 +409,9 @@ CATEGORY_SEEDS = {
 }
 
 
-def strip_markdown(text: str) -> str:
-    text = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', text)
-    text = re.sub(r'_{1,3}([^_]+?)_{1,3}', r'\1', text)
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[\-\*]\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```[^`]*```', '', text)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
+# ===========================================================================
+# Validation Failure Logging
+# ===========================================================================
 
 def _github_headers() -> Dict[str, str]:
     headers = {"Accept": "application/vnd.github.v3+json"}
@@ -409,6 +419,55 @@ def _github_headers() -> Dict[str, str]:
         headers["Authorization"] = f"token {GH_TOKEN}"
     return headers
 
+
+def log_validation_failure(topic: str, category: str, reason: str, details: dict, content: str) -> None:
+    if not GH_TOKEN or not KNOWLEDGE_REPO:
+        return
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scraper": SCRAPER_NAME,
+        "model": CLOUDFLARE_MODEL if CLOUDFLARE_ACCOUNT_ID else "mistral-small-latest",
+        "topic": topic,
+        "category": category,
+        "reason": reason,
+        "details": details,
+        "content_preview": content[:500] if content else "",
+    }
+
+    try:
+        url = f"{GITHUB_API}/repos/{KNOWLEDGE_REPO}/contents/{VALIDATION_LOG_PATH}"
+        sha = ""
+        current_content = ""
+        try:
+            resp = requests.get(url, headers=_github_headers(), timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                sha = data.get("sha", "")
+                if data.get("content"):
+                    current_content = base64.b64decode(data["content"]).decode("utf-8")
+        except Exception:
+            pass
+
+        new_line = json.dumps(entry) + "\n"
+        updated_content = current_content + new_line
+
+        payload = {
+            "message": f"Log validation failure: {topic[:50]}",
+            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        requests.put(url, json=payload, headers=_github_headers(), timeout=15)
+    except Exception:
+        pass
+
+
+# ===========================================================================
+# State File Operations
+# ===========================================================================
 
 def _init_scraper_state(state: Dict) -> None:
     if SCRAPER_NAME not in state:
@@ -498,6 +557,10 @@ def record_rejected(state: Dict, topic: str) -> Dict:
     return state
 
 
+# ===========================================================================
+# Category Awareness
+# ===========================================================================
+
 def get_category_counts() -> Dict[str, int]:
     category_slugs = {
         "Agriculture & Farming": "agriculture_farming",
@@ -552,6 +615,10 @@ def pick_category_weighted(counts: Dict[str, int], focus: List[str]) -> str:
     return random.choice(weighted)
 
 
+# ===========================================================================
+# Batch Topic Cache
+# ===========================================================================
+
 def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     last_topics = get_last_topics(state, 100)
     rejected = state.get(SCRAPER_NAME, {}).get("rejected_topics", [])[-50:]
@@ -573,12 +640,10 @@ def refill_topic_cache(state: Dict, focus_categories: List[str]) -> List[str]:
     system_prompt = (
         "You are a topic generator for an environmental knowledge base about Africa. "
         f"Generate {num_regular} regular topics and {num_comparisons} comparison topics (total {TOPIC_CACHE_SIZE}). "
-        "Regular topics should be specific and narrow — something a real person would know from "
-        "living close to the land, managing natural resources, or observing environmental changes. "
-        "Comparison topics should compare two environmental approaches, methods, or ecosystems. "
+        "Regular topics should be specific and narrow. "
+        "Comparison topics should compare two environmental approaches. "
         "Focus on: climate adaptation, conservation, renewable energy, water management, "
-        "waste reduction, biodiversity, sustainable practices, and environmental education. "
-        "Format comparison topics like 'X vs Y: which is better for...' or 'Differences between X and Y in...'. "
+        "waste reduction, biodiversity, and environmental education. "
         "Return one topic per line. No numbering, no bullet points, no markdown. "
         "Each line must be a unique topic. "
         + BANNED_INSTRUCTION
@@ -683,11 +748,10 @@ def get_next_topic(state: Dict, focus_categories: List[str]) -> Tuple[str, str]:
 
 
 # ===========================================================================
-# AI Content Generation — Cloudflare (Primary)
+# AI Content Generation — Cloudflare
 # ===========================================================================
 
 def generate_with_cloudflare(topic: str, style: Dict, language: str) -> str:
-    """Generate content using Cloudflare Workers AI."""
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return ""
 
@@ -734,11 +798,10 @@ def generate_with_cloudflare(topic: str, style: Dict, language: str) -> str:
 # ===========================================================================
 
 def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
-    """Generate content using Mistral API (fallback)."""
     if not MISTRAL_API_KEY:
         return ""
 
-    print(f"    [Mistral] Style: {style['name']} | Model: mistral-small-latest | Language: {language}")
+    print(f"    [Mistral] Style: {style['name']} | Language: {language}")
     sys.stdout.flush()
 
     user_prompt = style["user_template"].replace("{topic}", topic).replace("{language}", language)
@@ -776,23 +839,42 @@ def generate_with_mistral(topic: str, style: Dict, language: str) -> str:
         return ""
 
 
-def generate_content(topic: str, language: str) -> str:
+def generate_content(topic: str, language: str) -> Tuple[str, str]:
     style = random.choice(PROMPT_STYLES)
+    source = ""
 
-    # Primary: Cloudflare
-    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-        content = generate_with_cloudflare(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+    for attempt in range(MAX_RETRIES):
+        raw = ""
 
-    # Fallback: Mistral
-    if MISTRAL_API_KEY:
-        content = generate_with_mistral(topic, style, language)
-        if content and len(content) >= MIN_CONTENT_LENGTH:
-            return content
+        if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+            raw = generate_with_cloudflare(topic, style, language)
+            source = "cloudflare"
 
-    return ""
+        if not raw and MISTRAL_API_KEY:
+            raw = generate_with_mistral(topic, style, language)
+            source = "mistral"
 
+        if not raw:
+            continue
+
+        cleaned = strip_markdown_symbols(raw) if VALIDATOR_AVAILABLE else raw
+
+        if not VALIDATOR_AVAILABLE:
+            return cleaned, source
+
+        passed, details = check_human_voice(cleaned)
+        if passed and len(cleaned) >= MIN_CONTENT_LENGTH:
+            return cleaned, source
+
+        print(f"    Attempt {attempt + 1} validation: {details['reasons']}")
+        time.sleep(5)
+
+    return "", source
+
+
+# ===========================================================================
+# Submission
+# ===========================================================================
 
 def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> Tuple[bool, str]:
     session = requests.Session()
@@ -845,41 +927,36 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
         return False, ""
 
 
+# ===========================================================================
+# Main
+# ===========================================================================
+
 def run_ai_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"AI Scraper v4.0.0 — Cloudflare (Qwen) — Environment & Nature — {SCRAPER_NAME}")
+    print(f"AI Scraper v5.0.0 — Cloudflare (Qwen) — Environment & Nature — {SCRAPER_NAME}")
     print(f"Category: Environment & Nature")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Model: {CLOUDFLARE_MODEL}")
     print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
-    print(f"Topic cache: {TOPIC_CACHE_SIZE} topics per batch")
-    print(f"Comparisons: ~{int(COMPARISON_TOPIC_RATIO * 100)}% of topics")
     print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
     print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'} (fallback)")
-    print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
-    print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
-    print(f"Banned orgs: {len(BANNED_ORGS)} organizations blocked")
+    print(f"Human voice check: {'ENABLED' if VALIDATOR_AVAILABLE else 'DISABLED'}")
     print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
     print("-" * 60)
     sys.stdout.flush()
 
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        if not MISTRAL_API_KEY:
-            print("ERROR: No AI providers configured (Cloudflare and Mistral both missing).")
-            return
-        print("WARNING: Cloudflare not configured. Using Mistral only (limited quota).")
+    if not CLOUDFLARE_ACCOUNT_ID and not MISTRAL_API_KEY:
+        print("ERROR: No AI providers configured.")
+        return
 
     state = load_state()
     _init_scraper_state(state)
     print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
-    cache_size = len(state.get(SCRAPER_NAME, {}).get('topic_cache', []))
-    cache_idx = state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
-    if cache_size > 0:
-        print(f"  Cached topics remaining: {cache_size - cache_idx}")
 
     submission_count = 0
     failed = 0
+    validation_rejected = 0
 
     for i in range(max_submissions):
         if submission_count >= max_submissions:
@@ -895,32 +972,18 @@ def run_ai_scraper(max_submissions: int = 10):
 
         language = random.choice(LANGUAGES)
 
-        knowledge = generate_content(topic, language)
+        knowledge, source = generate_content(topic, language)
         if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
             failed += 1
-            print(f"  Failed to generate content (got {len(knowledge) if knowledge else 0} chars)")
+            print(f"  Failed to generate valid content after {MAX_RETRIES} attempts")
             state = record_topic(state, topic, "", False)
-            continue
-
-        knowledge = strip_markdown(knowledge)
-        knowledge = re.sub(
-            r'(?i)(as an AI|as a language model|I am an AI|based on my training|I cannot|I don\'t have personal)',
-            '', knowledge
-        ).strip()
-
-        if not _check_banned_content(knowledge):
-            failed += 1
-            print("  Failed: Content contains banned organizations after stripping")
-            state = record_topic(state, topic, "", False)
-            continue
-
-        if len(knowledge) < MIN_CONTENT_LENGTH:
-            failed += 1
-            state = record_topic(state, topic, "", False)
+            if knowledge:
+                log_validation_failure(topic, category, "validation_failed", {}, knowledge)
+                validation_rejected += 1
             continue
 
         print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
-        print(f"  Language: {language}")
+        print(f"  Source: {source}")
         sys.stdout.flush()
 
         success, submission_id = submit_to_form(topic, category, knowledge, language)
@@ -929,21 +992,12 @@ def run_ai_scraper(max_submissions: int = 10):
             submission_count += 1
             state = record_topic(state, topic, submission_id, True)
 
-            # Log metadata for source tracking
             if METADATA_AVAILABLE:
                 try:
-                    # Determine which provider was used
-                    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
-                        source = "cloudflare"
-                        model = CLOUDFLARE_MODEL
-                    else:
-                        source = "mistral"
-                        model = "mistral-small-latest"
-
                     log_entry_metadata(
                         submission_id=submission_id,
                         source=source,
-                        model=model,
+                        model=CLOUDFLARE_MODEL if source == "cloudflare" else "mistral-small-latest",
                         type="ai",
                         category=category,
                         email=""
@@ -967,9 +1021,7 @@ def run_ai_scraper(max_submissions: int = 10):
             time.sleep(wait_time)
 
     print("\n" + "=" * 60)
-    print(f"Done: {submission_count} submitted | {failed} failed")
-    cache_remaining = len(state.get(SCRAPER_NAME, {}).get('topic_cache', [])) - state.get(SCRAPER_NAME, {}).get('topic_cache_index', 0)
-    print(f"Cache remaining: {max(0, cache_remaining)}")
+    print(f"Done: {submission_count} submitted | {failed} failed | {validation_rejected} rejected")
     print("=" * 60)
 
 
