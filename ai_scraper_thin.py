@@ -848,4 +848,165 @@ def generate_content(topic: str, language: str) -> Tuple[str, str]:
 # Submission
 # ===========================================================================
 
-def submit_to_form(topic: str, category: str, knowledge: str, language: str) ->
+def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> Tuple[bool, str]:
+    session = requests.Session()
+    try:
+        print(f"    Fetching form...")
+        sys.stdout.flush()
+        form_response = session.get(TRAINING_FORM_URL, timeout=REQUEST_TIMEOUT)
+        if form_response.status_code != 200:
+            print(f"    Form returned {form_response.status_code}")
+            return False, ""
+        html = form_response.text
+
+        csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
+        if not csrf_match:
+            return False, ""
+        csrf_token = csrf_match.group(1)
+
+        code_match = re.search(r'verification-code[^>]*>(\d{6})<', html)
+        if not code_match:
+            return False, ""
+        verification_code = code_match.group(1)
+
+        app_check_token = SCRAPER_API_KEY if SCRAPER_API_KEY else ""
+
+        submit_data = {
+            "topic": topic, "category": category, "knowledge": knowledge,
+            "region": "", "language": language, "email": "",
+            "verification_code": verification_code, "csrf_token": csrf_token,
+            "app_check_token": app_check_token, "copyright_confirm": "on",
+        }
+
+        print(f"    Submitting... (Language: {language})")
+        sys.stdout.flush()
+        submit_response = session.post(
+            f"{TRAINING_FORM_URL}/submit", data=submit_data,
+            timeout=REQUEST_TIMEOUT, allow_redirects=True,
+        )
+
+        if submit_response.status_code == 200:
+            id_match = re.search(r'GHGPT-\d{4}-\d{4}', submit_response.text)
+            submission_id = id_match.group(0) if id_match else "unknown"
+            print(f"    Submitted! ID: {submission_id}")
+            sys.stdout.flush()
+            return True, submission_id
+        else:
+            print(f"    Failed. Status: {submit_response.status_code}")
+            return False, ""
+    except Exception as e:
+        print(f"    ERROR: {e}")
+        return False, ""
+
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+def run_ai_scraper(max_submissions: int = 10):
+    print("=" * 60)
+    print(f"AI Scraper v5.0.0 — Cloudflare (Qwen) — Thin Categories — {SCRAPER_NAME}")
+    print("=" * 60)
+    print(f"Target: {max_submissions} submissions")
+    print(f"Model: {CLOUDFLARE_MODEL}")
+    print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
+    print(f"Min content: {MIN_CONTENT_LENGTH} chars | ~670+ words")
+    print(f"Cloudflare: {'ACTIVE' if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN else 'NOT SET'}")
+    print(f"Mistral: {'ACTIVE' if MISTRAL_API_KEY else 'NOT SET'} (fallback)")
+    print(f"Human voice check: {'ENABLED' if VALIDATOR_AVAILABLE else 'DISABLED'}")
+    print(f"Metadata: {'ENABLED' if METADATA_AVAILABLE else 'DISABLED'}")
+    print("-" * 60)
+    sys.stdout.flush()
+
+    if not CLOUDFLARE_ACCOUNT_ID and not MISTRAL_API_KEY:
+        print("ERROR: No AI providers configured.")
+        return
+
+    state = load_state()
+    _init_scraper_state(state)
+    print(f"  Previous submissions: {state.get(SCRAPER_NAME, {}).get('total_submitted', 0)}")
+
+    submission_count = 0
+    failed = 0
+    validation_rejected = 0
+
+    for i in range(max_submissions):
+        if submission_count >= max_submissions:
+            break
+
+        print(f"\n[{submission_count + 1}/{max_submissions}] Getting topic from cache...")
+        sys.stdout.flush()
+
+        topic, category = get_next_topic(state, FOCUS_CATEGORIES)
+        print(f"  Topic: {topic}")
+        print(f"  Category: {category}")
+        sys.stdout.flush()
+
+        language = random.choice(LANGUAGES)
+
+        knowledge, source = generate_content(topic, language)
+        if not knowledge or len(knowledge) < MIN_CONTENT_LENGTH:
+            failed += 1
+            print(f"  Failed to generate valid content after {MAX_RETRIES} attempts")
+            state = record_topic(state, topic, "", False)
+            if knowledge:
+                log_validation_failure(topic, category, "validation_failed", {}, knowledge)
+                validation_rejected += 1
+            continue
+
+        print(f"  Content: {len(knowledge)} chars (~{len(knowledge.split())} words)")
+        print(f"  Source: {source}")
+        sys.stdout.flush()
+
+        success, submission_id = submit_to_form(topic, category, knowledge, language)
+
+        if success:
+            submission_count += 1
+            state = record_topic(state, topic, submission_id, True)
+
+            if METADATA_AVAILABLE:
+                try:
+                    log_entry_metadata(
+                        submission_id=submission_id,
+                        source=source,
+                        model=CLOUDFLARE_MODEL if source == "cloudflare" else "mistral-small-latest",
+                        type="ai",
+                        category=category,
+                        email=""
+                    )
+                    print(f"  [Metadata] Logged: {submission_id}")
+                except Exception as e:
+                    print(f"  [Metadata] Failed to log: {e}")
+        else:
+            failed += 1
+            state = record_topic(state, topic, "", False)
+            if "already been submitted" in str(submission_id):
+                state = record_rejected(state, topic)
+
+        if GH_TOKEN:
+            save_state(state)
+
+        if submission_count < max_submissions and (i < max_submissions - 1):
+            wait_time = SUBMISSION_DELAY + random.randint(1, 10)
+            print(f"  Waiting {wait_time}s...")
+            sys.stdout.flush()
+            time.sleep(wait_time)
+
+    print("\n" + "=" * 60)
+    print(f"Done: {submission_count} submitted | {failed} failed | {validation_rejected} rejected")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    is_automated = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
+    if is_automated:
+        count = SUBMISSIONS_PER_RUN
+    else:
+        confirm = input(f"\nHow many submissions? (default {SUBMISSIONS_PER_RUN}): ").strip()
+        try:
+            count = int(confirm) if confirm else SUBMISSIONS_PER_RUN
+        except ValueError:
+            count = SUBMISSIONS_PER_RUN
+    print(f"\nStarting AI scraper with {count} submissions...\n")
+    sys.stdout.flush()
+    run_ai_scraper(max_submissions=count)
