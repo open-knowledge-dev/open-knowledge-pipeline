@@ -765,4 +765,35 @@ def run_scraper(max_submissions: int = 10):
 
         if success:
             submission_count += 1
-            state
+            state = record_submission(state, topic, source_url, True)
+        else:
+            failed += 1
+            state = record_submission(state, topic, source_url, False)
+
+        if GH_TOKEN:
+            save_state(state)
+
+        if submission_count < max_submissions:
+            wait_time = SUBMISSION_DELAY + random.randint(1, 15)
+            print(f"  Waiting {wait_time}s...")
+            sys.stdout.flush()
+            time.sleep(wait_time)
+
+    print("\n" + "=" * 60)
+    print(f"Done: {submission_count} submitted | {skipped} skipped | {failed} failed")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    is_automated = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
+    if is_automated:
+        count = SUBMISSIONS_PER_RUN
+    else:
+        confirm = input(f"\nHow many submissions? (default {SUBMISSIONS_PER_RUN}): ").strip()
+        try:
+            count = int(confirm) if confirm else SUBMISSIONS_PER_RUN
+        except ValueError:
+            count = SUBMISSIONS_PER_RUN
+    print(f"\nStarting web scraper with {count} submissions...\n")
+    sys.stdout.flush()
+    run_scraper(max_submissions=count)
