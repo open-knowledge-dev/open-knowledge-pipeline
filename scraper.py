@@ -1,5 +1,5 @@
 """
-Web Knowledge Scraper — v2.4
+Web Knowledge Scraper — v2.5
 =============================
 Searches public domain sources for knowledge content with:
 - Wikipedia as primary source (most relevant)
@@ -13,6 +13,7 @@ Searches public domain sources for knowledge content with:
 - Multiple rewrite styles for variety
 - Region field left empty
 - Language variation (70% English, 30% French/Portuguese/Arabic/Swahili)
+- Domain block list — prevents scraping banned sources
 
 Sources: Wikipedia, StackExchange, MDN Web Docs
 """
@@ -27,6 +28,7 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+from urllib.parse import urlparse
 
 
 # ===========================================================================
@@ -51,6 +53,49 @@ STATE_FILE_PATH = "admin/scraper-state.json"
 
 MIN_SCRAPED_LENGTH = 500
 MIN_REWRITTEN_LENGTH = 350
+
+
+# ===========================================================================
+# Banned Domains — Never scrape from these sources
+# ===========================================================================
+
+BLOCKED_DOMAINS = [
+    "fao.org",
+    "who.int",
+    "un.org",
+    "unicef.org",
+    "undp.org",
+    "unesco.org",
+    "worldbank.org",
+    "imf.org",
+    "wfp.org",
+    "ilo.org",
+    "wto.org",
+    "usaid.gov",
+    "dfid.gov.uk",
+    "giz.de",
+    "afdb.org",
+    "europa.eu",
+    "european-union.europa.eu",
+]
+
+
+def is_domain_blocked(url: str) -> bool:
+    """Check if a URL's domain is in the blocked list."""
+    if not url:
+        return False
+    try:
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        for blocked in BLOCKED_DOMAINS:
+            if domain == blocked or domain.endswith("." + blocked):
+                print(f"    [BLOCKED] Domain not allowed: {domain}")
+                return True
+    except Exception:
+        pass
+    return False
+
 
 # ===========================================================================
 # Language Variation
@@ -327,10 +372,6 @@ def pick_topic_for_category(category: str, state: Dict) -> str:
 # ===========================================================================
 
 def is_content_relevant(topic: str, content: str, category: str) -> bool:
-    """
-    Strict relevance check to prevent topic/content mismatch.
-    Requires at least 3 matching topic words AND 40% ratio AND category keyword match.
-    """
     stop_words = {
         "the", "and", "for", "with", "that", "this", "from", "are", "was",
         "have", "has", "had", "not", "but", "its", "can", "all", "will",
@@ -381,7 +422,7 @@ def search_wikipedia(topic: str, category: str) -> Optional[Tuple[str, str]]:
             "action": "query", "list": "search", "srsearch": topic,
             "format": "json", "srlimit": 3,
         }
-        headers = {"User-Agent": "KnowledgePipeline/2.4"}
+        headers = {"User-Agent": "KnowledgePipeline/2.5"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         results = data.get("query", {}).get("search", [])
@@ -389,6 +430,12 @@ def search_wikipedia(topic: str, category: str) -> Optional[Tuple[str, str]]:
             return None
         for result in results[:3]:
             page_title = result["title"]
+            page_url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
+
+            if is_domain_blocked(page_url):
+                print(f"    [BLOCKED] Skipping {page_url}")
+                continue
+
             extract_params = {
                 "action": "query", "prop": "extracts", "exintro": False,
                 "explaintext": True, "titles": page_title, "format": "json",
@@ -400,10 +447,9 @@ def search_wikipedia(topic: str, category: str) -> Optional[Tuple[str, str]]:
                 extract = page_data.get("extract", "")
                 if extract and len(extract) >= MIN_SCRAPED_LENGTH:
                     if is_content_relevant(topic, extract, category):
-                        url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
                         print(f"    Got {len(extract)} chars — relevant")
                         sys.stdout.flush()
-                        return extract[:5000], url
+                        return extract[:5000], page_url
         return None
     except Exception as e:
         print(f"    Wikipedia error: {e}")
@@ -430,7 +476,7 @@ def search_stackexchange(topic: str, category: str) -> Optional[Tuple[str, str]]
             "order": "desc", "sort": "votes", "q": topic,
             "site": "stackoverflow", "pagesize": 1, "filter": "withbody",
         }
-        headers = {"User-Agent": "KnowledgePipeline/2.4"}
+        headers = {"User-Agent": "KnowledgePipeline/2.5"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -438,12 +484,17 @@ def search_stackexchange(topic: str, category: str) -> Optional[Tuple[str, str]]
         if not items:
             return None
         item = items[0]
+        url = item.get("link", "")
+
+        if is_domain_blocked(url):
+            print(f"    [BLOCKED] Skipping {url}")
+            return None
+
         title = item.get("title", "")
         body = re.sub(r'<[^>]+>', ' ', item.get("body", ""))
         body = re.sub(r'\s+', ' ', body).strip()
         combined = f"{title}. {body[:1500]}"
         if len(combined) >= MIN_SCRAPED_LENGTH and is_content_relevant(topic, combined, category):
-            url = item.get("link", "")
             print(f"    Got {len(combined)} chars — relevant")
             sys.stdout.flush()
             return combined[:5000], url
@@ -468,7 +519,7 @@ def search_mdn(topic: str, category: str) -> Optional[Tuple[str, str]]:
     try:
         search_url = "https://developer.mozilla.org/api/v1/search"
         params = {"q": topic, "locale": "en-US"}
-        headers = {"User-Agent": "KnowledgePipeline/2.4"}
+        headers = {"User-Agent": "KnowledgePipeline/2.5"}
         response = requests.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             return None
@@ -476,9 +527,14 @@ def search_mdn(topic: str, category: str) -> Optional[Tuple[str, str]]:
         if not documents:
             return None
         doc = documents[0]
+        url = f"https://developer.mozilla.org{doc.get('mdn_url', '')}"
+
+        if is_domain_blocked(url):
+            print(f"    [BLOCKED] Skipping {url}")
+            return None
+
         combined = f"{doc.get('title', '')}. {doc.get('summary', '')}"
         if len(combined) >= MIN_SCRAPED_LENGTH and is_content_relevant(topic, combined, category):
-            url = f"https://developer.mozilla.org{doc.get('mdn_url', '')}"
             print(f"    Got {len(combined)} chars — relevant")
             sys.stdout.flush()
             return combined[:5000], url
@@ -649,7 +705,7 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 
 def run_scraper(max_submissions: int = 10):
     print("=" * 60)
-    print(f"Web Scraper v2.4 — {SCRAPER_NAME}")
+    print(f"Web Scraper v2.5 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {max_submissions} submissions")
     print(f"Focus: {FOCUS_CATEGORIES if FOCUS_CATEGORIES else 'All categories'}")
@@ -657,6 +713,7 @@ def run_scraper(max_submissions: int = 10):
     print(f"State: {'ENABLED' if GH_TOKEN else 'DISABLED'}")
     print(f"Languages: 70% English, 30% French/Portuguese/Arabic/Swahili")
     print(f"Relevance gate: 3+ word match + 40% ratio + category keywords")
+    print(f"Blocked domains: {len(BLOCKED_DOMAINS)}")
     print("-" * 60)
     sys.stdout.flush()
 
@@ -708,35 +765,4 @@ def run_scraper(max_submissions: int = 10):
 
         if success:
             submission_count += 1
-            state = record_submission(state, topic, source_url, True)
-        else:
-            failed += 1
-            state = record_submission(state, topic, source_url, False)
-
-        if GH_TOKEN:
-            save_state(state)
-
-        if submission_count < max_submissions:
-            wait_time = SUBMISSION_DELAY + random.randint(1, 15)
-            print(f"  Waiting {wait_time}s...")
-            sys.stdout.flush()
-            time.sleep(wait_time)
-
-    print("\n" + "=" * 60)
-    print(f"Done: {submission_count} submitted | {skipped} skipped | {failed} failed")
-    print("=" * 60)
-
-
-if __name__ == "__main__":
-    is_automated = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
-    if is_automated:
-        count = SUBMISSIONS_PER_RUN
-    else:
-        confirm = input(f"\nHow many submissions? (default {SUBMISSIONS_PER_RUN}): ").strip()
-        try:
-            count = int(confirm) if confirm else SUBMISSIONS_PER_RUN
-        except ValueError:
-            count = SUBMISSIONS_PER_RUN
-    print(f"\nStarting web scraper with {count} submissions...\n")
-    sys.stdout.flush()
-    run_scraper(max_submissions=count)
+            state
