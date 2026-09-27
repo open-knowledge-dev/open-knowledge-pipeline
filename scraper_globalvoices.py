@@ -1,10 +1,11 @@
 """
-Global Voices Scraper — Multilingual News
-==========================================
+Global Voices Scraper — Multilingual News — v1.1
+=================================================
 Fetches articles from Global Voices RSS feed (globalvoices.org).
 Content licensed under CC-BY — safe for AI training.
 
 Produces knowledge entries for Culture, Governance, and related categories.
+Includes domain block list — prevents scraping banned sources.
 """
 
 import os
@@ -17,6 +18,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+from urllib.parse import urlparse
 
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
@@ -29,12 +31,54 @@ SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-globalvoices")
 RSS_FEED = "https://globalvoices.org/feed/"
 
 
+# ===========================================================================
+# Banned Domains
+# ===========================================================================
+
+BLOCKED_DOMAINS = [
+    "fao.org",
+    "who.int",
+    "un.org",
+    "unicef.org",
+    "undp.org",
+    "unesco.org",
+    "worldbank.org",
+    "imf.org",
+    "wfp.org",
+    "ilo.org",
+    "wto.org",
+    "usaid.gov",
+    "dfid.gov.uk",
+    "giz.de",
+    "afdb.org",
+    "europa.eu",
+    "european-union.europa.eu",
+]
+
+
+def is_domain_blocked(url: str) -> bool:
+    """Check if a URL's domain is in the blocked list."""
+    if not url:
+        return False
+    try:
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        for blocked in BLOCKED_DOMAINS:
+            if domain == blocked or domain.endswith("." + blocked):
+                print(f"    [BLOCKED] Domain not allowed: {domain}")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def fetch_articles() -> List[Dict]:
     """Fetch articles from Global Voices RSS feed."""
     articles = []
     try:
         response = requests.get(RSS_FEED, timeout=REQUEST_TIMEOUT,
-                                headers={"User-Agent": "GhanaGPT-GlobalVoices/1.0"})
+                                headers={"User-Agent": "KnowledgePipeline/1.1"})
         if response.status_code != 200:
             return articles
 
@@ -43,6 +87,11 @@ def fetch_articles() -> List[Dict]:
             title = item.findtext("title", "")
             description = item.findtext("description", "")
             link = item.findtext("link", "")
+
+            if is_domain_blocked(link):
+                print(f"    [BLOCKED] Skipping article: {link}")
+                continue
+
             if title and description:
                 clean_desc = re.sub(r'<[^>]+>', ' ', description)
                 clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
@@ -122,9 +171,10 @@ def determine_category(title: str) -> str:
 def run_scraper():
     """Main scraper loop."""
     print("=" * 60)
-    print(f"Global Voices Scraper — {SCRAPER_NAME}")
+    print(f"Global Voices Scraper v1.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {SUBMISSIONS_PER_RUN} submissions")
+    print(f"Blocked domains: {len(BLOCKED_DOMAINS)}")
     sys.stdout.flush()
 
     articles = fetch_articles()
@@ -140,7 +190,6 @@ def run_scraper():
         category = determine_category(topic)
         content = article["content"]
 
-        # Rewrite in conversational voice
         starters = [
             "I read something interesting about this recently.",
             "People are talking about this across Africa.",
