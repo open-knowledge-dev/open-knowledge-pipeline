@@ -1,10 +1,11 @@
 """
-Tatoeba Scraper — Language Sentences
-=====================================
+Tatoeba Scraper — Language Sentences — v1.1
+============================================
 Fetches sentence pairs from Tatoeba API (tatoeba.org).
 Content licensed under CC-BY — safe for AI training.
 
 Produces language knowledge entries for the Language & Proverbs category.
+Includes domain block list — prevents scraping banned sources.
 """
 
 import os
@@ -16,6 +17,7 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+from urllib.parse import urlparse
 
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
@@ -26,6 +28,49 @@ REQUEST_TIMEOUT = 30
 SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-tatoeba")
 
 TATOEBA_API = "https://tatoeba.org/en/api"
+
+
+# ===========================================================================
+# Banned Domains
+# ===========================================================================
+
+BLOCKED_DOMAINS = [
+    "fao.org",
+    "who.int",
+    "un.org",
+    "unicef.org",
+    "undp.org",
+    "unesco.org",
+    "worldbank.org",
+    "imf.org",
+    "wfp.org",
+    "ilo.org",
+    "wto.org",
+    "usaid.gov",
+    "dfid.gov.uk",
+    "giz.de",
+    "afdb.org",
+    "europa.eu",
+    "european-union.europa.eu",
+]
+
+
+def is_domain_blocked(url: str) -> bool:
+    """Check if a URL's domain is in the blocked list."""
+    if not url:
+        return False
+    try:
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        for blocked in BLOCKED_DOMAINS:
+            if domain == blocked or domain.endswith("." + blocked):
+                print(f"    [BLOCKED] Domain not allowed: {domain}")
+                return True
+    except Exception:
+        pass
+    return False
+
 
 LANGUAGES = [
     ("eng", "English"), ("fra", "French"), ("por", "Portuguese"),
@@ -39,8 +84,13 @@ LANGUAGES = [
 def fetch_sentences(lang_code: str, limit: int = 10) -> List[Dict]:
     """Fetch sentences from Tatoeba API for a given language."""
     url = f"{TATOEBA_API}/search"
+
+    if is_domain_blocked(url):
+        print(f"    [BLOCKED] Skipping {url}")
+        return []
+
     params = {"from": "eng", "to": lang_code, "limit": limit}
-    headers = {"User-Agent": "GhanaGPT-Tatoeba/1.0"}
+    headers = {"User-Agent": "KnowledgePipeline/1.1"}
 
     try:
         response = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -103,9 +153,10 @@ def submit_to_form(topic: str, category: str, knowledge: str, language: str) -> 
 def run_scraper():
     """Main scraper loop."""
     print("=" * 60)
-    print(f"Tatoeba Scraper — {SCRAPER_NAME}")
+    print(f"Tatoeba Scraper v1.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {SUBMISSIONS_PER_RUN} submissions")
+    print(f"Blocked domains: {len(BLOCKED_DOMAINS)}")
     sys.stdout.flush()
 
     submission_count = 0
@@ -122,7 +173,6 @@ def run_scraper():
             print(f"    No sentences found")
             continue
 
-        # Build knowledge from sentences
         lines = []
         for item in sentences[:10]:
             eng = item.get("text", "")
