@@ -1,10 +1,11 @@
 """
-Sacred Texts Archive Scraper
-=============================
+Sacred Texts Archive Scraper — v1.1
+====================================
 Scrapes public domain religious and folklore texts from sacred-texts.com.
 All content is public domain — zero copyright restrictions.
 
 Produces knowledge entries for Religion & Spirituality and Culture & Traditions.
+Includes domain block list — prevents scraping banned sources.
 """
 
 import os
@@ -15,6 +16,7 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
+from urllib.parse import urlparse
 
 
 TRAINING_FORM_URL = os.getenv("TRAINING_FORM_URL", "")
@@ -25,6 +27,49 @@ REQUEST_TIMEOUT = 30
 SCRAPER_NAME = os.getenv("SCRAPER_NAME", "web-sacredtexts")
 
 SACRED_TEXTS_URL = "https://sacred-texts.com"
+
+
+# ===========================================================================
+# Banned Domains
+# ===========================================================================
+
+BLOCKED_DOMAINS = [
+    "fao.org",
+    "who.int",
+    "un.org",
+    "unicef.org",
+    "undp.org",
+    "unesco.org",
+    "worldbank.org",
+    "imf.org",
+    "wfp.org",
+    "ilo.org",
+    "wto.org",
+    "usaid.gov",
+    "dfid.gov.uk",
+    "giz.de",
+    "afdb.org",
+    "europa.eu",
+    "european-union.europa.eu",
+]
+
+
+def is_domain_blocked(url: str) -> bool:
+    """Check if a URL's domain is in the blocked list."""
+    if not url:
+        return False
+    try:
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        for blocked in BLOCKED_DOMAINS:
+            if domain == blocked or domain.endswith("." + blocked):
+                print(f"    [BLOCKED] Domain not allowed: {domain}")
+                return True
+    except Exception:
+        pass
+    return False
+
 
 TOPICS = [
     ("/afr/index.htm", "African traditional religion and folklore", "Religion & Spirituality"),
@@ -46,21 +91,24 @@ TOPICS = [
 def fetch_page_content(path: str) -> Optional[str]:
     """Fetch and extract text content from a sacred-texts page."""
     url = f"{SACRED_TEXTS_URL}{path}"
+
+    if is_domain_blocked(url):
+        print(f"    [BLOCKED] Skipping {url}")
+        return None
+
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT,
-                                headers={"User-Agent": "GhanaGPT-SacredTexts/1.0"})
+                                headers={"User-Agent": "KnowledgePipeline/1.1"})
         if response.status_code != 200:
             return None
 
         html = response.text
-        # Extract text between body tags, remove HTML
         body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
         if body_match:
             text = body_match.group(1)
         else:
             text = html
 
-        # Clean HTML
         text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<[^>]+>', ' ', text)
@@ -124,9 +172,10 @@ def submit_to_form(topic: str, category: str, knowledge: str) -> Tuple[bool, str
 def run_scraper():
     """Main scraper loop."""
     print("=" * 60)
-    print(f"Sacred Texts Scraper — {SCRAPER_NAME}")
+    print(f"Sacred Texts Scraper v1.1 — {SCRAPER_NAME}")
     print("=" * 60)
     print(f"Target: {SUBMISSIONS_PER_RUN} submissions")
+    print(f"Blocked domains: {len(BLOCKED_DOMAINS)}")
     sys.stdout.flush()
 
     random.shuffle(TOPICS)
@@ -143,7 +192,6 @@ def run_scraper():
             print(f"    No content found")
             continue
 
-        # Rewrite in conversational voice
         starters = [
             "I have studied these ancient teachings for many years.",
             "These words of wisdom have survived for centuries.",
