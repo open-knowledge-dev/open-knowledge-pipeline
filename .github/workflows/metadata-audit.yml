@@ -2,7 +2,7 @@ name: Metadata Audit & Backfill
 
 on:
   schedule:
-    # Every 6 hours
+    
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
